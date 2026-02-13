@@ -123,7 +123,13 @@ def query_scholar(query: str) -> str:
     - str: The first search result formatted or an error message.
 
     """
-    from scholarly import ProxyGenerator, scholarly
+    try:
+        from scholarly import ProxyGenerator, scholarly
+    except Exception:
+        return (
+            "Google Scholar lookup is unavailable because optional dependency 'scholarly' is not installed. "
+            "Install it with `pip install scholarly`."
+        )
 
     # Set up a ProxyGenerator object to use free proxies
     # This needs to be done only once per session

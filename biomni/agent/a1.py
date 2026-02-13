@@ -53,6 +53,56 @@ class AgentState(TypedDict):
     next_step: str | None
 
 
+def _flatten_response_content_blocks(content: Any) -> str:
+    """Flatten LLM content blocks (including OpenAI Responses blocks) into plain text."""
+    if isinstance(content, str):
+        return content
+
+    if not isinstance(content, list):
+        return str(content)
+
+    def _extract_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            # Most common text-bearing keys across providers.
+            for key in ("text", "content", "value"):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    return candidate
+                if isinstance(candidate, list):
+                    nested = "".join(_extract_text(item) for item in candidate)
+                    if nested:
+                        return nested
+            return ""
+        if isinstance(value, list):
+            return "".join(_extract_text(item) for item in value)
+
+        for attr in ("text", "content"):
+            candidate = getattr(value, attr, None)
+            if isinstance(candidate, str):
+                return candidate
+            if isinstance(candidate, list):
+                nested = "".join(_extract_text(item) for item in candidate)
+                if nested:
+                    return nested
+        return ""
+
+    text_parts: list[str] = []
+    for block in content:
+        block_text = _extract_text(block)
+        if block_text:
+            text_parts.append(block_text)
+
+    if text_parts:
+        return "".join(text_parts)
+
+    # Last-resort fallback: preserve debuggability rather than returning empty.
+    return "".join(str(block) for block in content if block is not None)
+
+
 class A1:
     def __init__(
         self,
@@ -1399,26 +1449,8 @@ Each library is listed with its description to help you understand its functiona
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
             response = self.llm.invoke(messages)
 
-            # Normalize Responses API content blocks (list of dicts) into a plain string
-            content = response.content
-            if isinstance(content, list):
-                # Concatenate textual parts; ignore tool_use or other non-text blocks
-                text_parts: list[str] = []
-                for block in content:
-                    try:
-                        if isinstance(block, dict):
-                            btype = block.get("type")
-                            if btype in ("text", "output_text", "redacted_text"):
-                                part = block.get("text") or block.get("content") or ""
-                                if isinstance(part, str):
-                                    text_parts.append(part)
-                    except Exception:
-                        # Be conservative; skip malformed blocks
-                        continue
-                msg = "".join(text_parts)
-            else:
-                # Fallback to string conversion for legacy content
-                msg = str(content)
+            # Normalize content blocks from different model providers into plain text.
+            msg = _flatten_response_content_blocks(response.content)
 
             # Enhanced parsing for better OpenAI compatibility
             # Check for incomplete tags and fix them
@@ -1434,14 +1466,6 @@ Each library is listed with its description to help you understand its functiona
             execute_match = re.search(r"<execute>(.*?)</execute>", msg, re.DOTALL | re.IGNORECASE)
             answer_match = re.search(r"<solution>(.*?)</solution>", msg, re.DOTALL | re.IGNORECASE)
 
-            # Alternative patterns for OpenAI models that might use different formatting
-            if not execute_match:
-                # Try to find code blocks that might be intended as execute blocks
-                code_block_match = re.search(r"```(?:python|bash|r)?\s*(.*?)```", msg, re.DOTALL)
-                if code_block_match and not answer_match:
-                    # If we found a code block and no solution, treat it as execute
-                    execute_match = code_block_match
-
             # Add the message to the state before checking for errors
             state["messages"].append(AIMessage(content=msg.strip()))
 
@@ -1455,7 +1479,10 @@ Each library is listed with its description to help you understand its functiona
                 print("parsing error...")
 
                 error_count = sum(
-                    1 for m in state["messages"] if isinstance(m, AIMessage) and "There are no tags" in m.content
+                    1
+                    for m in state["messages"]
+                    if isinstance(m, HumanMessage)
+                    and "did not include valid XML tags" in str(getattr(m, "content", "")).lower()
                 )
 
                 if error_count >= 2:
@@ -1472,7 +1499,15 @@ Each library is listed with its description to help you understand its functiona
                     # Try to correct it
                     state["messages"].append(
                         HumanMessage(
-                            content="Each response must include thinking process followed by either <execute> or <solution> tag. But there are no tags in the current response. Please follow the instruction, fix and regenerate the response again."
+                            content=(
+                                "Your previous response did not include valid XML tags. "
+                                "Regenerate now with EXACTLY one of these formats:\n"
+                                "1) <execute>...code...</execute>\n"
+                                "2) <solution>...final answer only...</solution>\n"
+                                "If you are providing code, do NOT use markdown fences (```); "
+                                "you MUST wrap code with <execute> tags.\n"
+                                "Example:\n<execute>print('hello')</execute>"
+                            )
                         )
                     )
                     state["next_step"] = "generate"

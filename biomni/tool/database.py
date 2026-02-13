@@ -1,8 +1,10 @@
 import json
 import os
 import pickle
+import re
 import time
 from typing import Any
+from urllib.parse import unquote, urlparse, urlunparse
 
 import requests
 from Bio.Blast import NCBIWWW, NCBIXML
@@ -31,6 +33,25 @@ def get_hpo_names(hpo_terms: list[str], data_lake_path: str) -> list[str]:
         name = hp_dict.get(term, f"Unknown term: {term}")
         hpo_names.append(name)
     return hpo_names
+
+
+def query_pubmed(query: str, max_papers: int = 10, max_retries: int = 3) -> str:
+    """Backward-compatible alias for `biomni.tool.literature.query_pubmed`.
+
+    The literature tools were moved into the `biomni.tool.literature` module,
+    but older agent-generated code may still import `query_pubmed` from
+    `biomni.tool.database`.
+    """
+    from biomni.tool.literature import query_pubmed as _query_pubmed
+
+    return _query_pubmed(query=query, max_papers=max_papers, max_retries=max_retries)
+
+
+def query_scholar(query: str) -> str:
+    """Backward-compatible alias for `biomni.tool.literature.query_scholar`."""
+    from biomni.tool.literature import query_scholar as _query_scholar
+
+    return _query_scholar(query=query)
 
 
 def _query_llm_for_api(prompt, schema, system_template):
@@ -217,6 +238,85 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
             "response_url_error": url_error,
             "response_text": response_text,
         }
+
+
+_MONARCH_ASSOCIATION_CATEGORY_ALIASES = {
+    # Legacy / frequently hallucinated categories from older examples.
+    "biolink:GeneToDiseaseAssociation": "biolink:CausalGeneToDiseaseAssociation",
+    "biolink:GeneToPhenotypeAssociation": "biolink:GeneToPhenotypicFeatureAssociation",
+    "biolink:DiseaseToPhenotypeAssociation": "biolink:DiseaseToPhenotypicFeatureAssociation",
+    "biolink:ChemicalToDiseaseOrPhenotypicFeatureAssociation": "biolink:ChemicalEntityToDiseaseOrPhenotypicFeatureAssociation",
+}
+
+
+def _extract_monarch_association_category(endpoint: str) -> str | None:
+    """Extract a Monarch association category from `/entity/<id>/<category>` URLs."""
+    try:
+        parsed = urlparse(endpoint)
+    except Exception:
+        return None
+
+    match = re.search(r"/entity/[^/]+/([^/?]+)", parsed.path)
+    if not match:
+        return None
+    return unquote(match.group(1))
+
+
+def _replace_monarch_association_category(endpoint: str, new_category: str) -> str:
+    """Replace the association category segment in a Monarch entity-association URL."""
+    parsed = urlparse(endpoint)
+    new_path = re.sub(r"(/entity/[^/]+/)[^/?]+", rf"\1{new_category}", parsed.path, count=1)
+    return urlunparse(parsed._replace(path=new_path))
+
+
+def _normalize_monarch_association_category(endpoint: str) -> tuple[str, str | None, str | None]:
+    """Normalize legacy association categories to current Monarch-supported values."""
+    original = _extract_monarch_association_category(endpoint)
+    if not original:
+        return endpoint, None, None
+
+    normalized = _MONARCH_ASSOCIATION_CATEGORY_ALIASES.get(original)
+    if not normalized:
+        return endpoint, original, None
+    return _replace_monarch_association_category(endpoint, normalized), original, normalized
+
+
+def _is_monarch_category_validation_error(api_result: dict[str, Any]) -> bool:
+    """Return True when Monarch returns a 422 enum/category validation error."""
+    if not isinstance(api_result, dict):
+        return False
+    if api_result.get("success", False):
+        return False
+
+    error_text = str(api_result.get("error", ""))
+    detail_text = str(api_result.get("response_url_error", ""))
+    if "422" not in error_text:
+        return False
+    return "Input should be" in detail_text or '"type":"enum"' in detail_text or "GeneToDiseaseAssociation" in detail_text
+
+
+def _retry_monarch_with_compatible_category(endpoint: str, description: str, api_result: dict[str, Any]) -> dict[str, Any]:
+    """Retry Monarch call with a compatible category when a 422 enum error is detected."""
+    current_category = _extract_monarch_association_category(endpoint)
+    if not current_category:
+        return api_result
+
+    mapped_category = _MONARCH_ASSOCIATION_CATEGORY_ALIASES.get(current_category)
+    if not mapped_category:
+        detail_text = str(api_result.get("response_url_error", ""))
+        if "GeneToDiseaseAssociation" in detail_text:
+            mapped_category = "biolink:CausalGeneToDiseaseAssociation"
+
+    if not mapped_category or mapped_category == current_category:
+        return api_result
+
+    retry_endpoint = _replace_monarch_association_category(endpoint, mapped_category)
+    retry_description = f"{description} (compat retry: {current_category} -> {mapped_category})"
+    retry_result = _query_rest_api(endpoint=retry_endpoint, method="GET", description=retry_description)
+
+    if retry_result.get("success"):
+        return retry_result
+    return api_result
 
 
 def _query_ncbi_database(
@@ -2534,6 +2634,11 @@ def query_monarch(
                 endpoint = f"{base_url}/{endpoint.lstrip('/')}"
         description = "Direct query to Monarch API"
 
+    # Normalize commonly invalid legacy association categories before making API calls.
+    endpoint, original_category, normalized_category = _normalize_monarch_association_category(endpoint)
+    if normalized_category:
+        description = f"{description} (category normalized: {original_category} -> {normalized_category})"
+
     # Add max_results as a query parameter if not already present
     if "?" in endpoint:
         if "rows=" not in endpoint and "limit=" not in endpoint:
@@ -2542,6 +2647,8 @@ def query_monarch(
         endpoint += f"?limit={max_results}"
 
     api_result = _query_rest_api(endpoint=endpoint, method="GET", description=description)
+    if _is_monarch_category_validation_error(api_result):
+        api_result = _retry_monarch_with_compatible_category(endpoint=endpoint, description=description, api_result=api_result)
 
     if not verbose and "success" in api_result and api_result["success"] and "result" in api_result:
         return _format_query_results(api_result["result"])
@@ -2872,6 +2979,39 @@ def query_gnomad(
     return api_result
 
 
+def _blast_recovery_hint() -> str:
+    return (
+        "Hint: When BLAST is unavailable, use `query_uniprot` and `query_clinvar`, "
+        "then cross-check with literature tools (`query_pubmed` / `query_scholar`)."
+    )
+
+
+def _classify_blast_error(message: str) -> str:
+    lowered = message.lower()
+    network_tokens = (
+        "temporary failure",
+        "name resolution",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "network is unreachable",
+        "timed out",
+        "read timed out",
+    )
+
+    if "ssl" in lowered or "certificate" in lowered:
+        return "BLAST_UNAVAILABLE_SSL"
+    if "timeout" in lowered:
+        return "BLAST_TIMEOUT"
+    if any(token in lowered for token in network_tokens):
+        return "BLAST_NETWORK_ERROR"
+    return "BLAST_UNKNOWN_ERROR"
+
+
+def _format_blast_error(code: str, message: str) -> str:
+    return f"{code}: {message}. {_blast_recovery_hint()}"
+
+
 def blast_sequence(sequence: str, database: str, program: str) -> dict[str, str | float] | str:
     """Identifies a DNA sequence using NCBI BLAST with improved error handling, timeout management, and debugging.
 
@@ -2885,7 +3025,7 @@ def blast_sequence(sequence: str, database: str, program: str) -> dict[str, str 
         dict: A dictionary containing the title, e-value, identity percentage, and coverage percentage of the best alignment
 
     """
-    max_attempts = 1  # One initial attempt plus one retry
+    max_attempts = 1
     attempts = 0
     max_runtime = 600  # 10 minutes in seconds
 
@@ -2928,7 +3068,10 @@ def blast_sequence(sequence: str, database: str, program: str) -> dict[str, str 
                             print("BLAST job timeout exceeded. Resubmitting...")
                             break  # Break to retry
                         else:
-                            return "BLAST search failed after maximum attempts due to timeout"
+                            return _format_blast_error(
+                                "BLAST_TIMEOUT",
+                                "BLAST search failed after maximum attempts due to timeout",
+                            )
                     # Brief pause before trying again
                     time.sleep(1)
 
@@ -2937,7 +3080,10 @@ def blast_sequence(sequence: str, database: str, program: str) -> dict[str, str 
                 if attempts < max_attempts:
                     continue  # Retry
                 else:
-                    return "BLAST search failed after maximum attempts due to timeout"
+                    return _format_blast_error(
+                        "BLAST_TIMEOUT",
+                        "BLAST search failed after maximum attempts due to timeout",
+                    )
 
             # Debug information
             print(f"Number of alignments found: {len(blast_record.alignments)}")
@@ -2969,9 +3115,11 @@ def blast_sequence(sequence: str, database: str, program: str) -> dict[str, str 
                 print(f"Error during BLAST search: {str(e)}. Retrying...")
                 time.sleep(2)  # Wait briefly before retrying
             else:
-                return f"Error during BLAST search after maximum attempts: {str(e)}"
+                err = str(e)
+                code = _classify_blast_error(err)
+                return _format_blast_error(code, f"Error during BLAST search after maximum attempts: {err}")
 
-    return "BLAST search failed after maximum attempts"
+    return _format_blast_error("BLAST_UNKNOWN_ERROR", "BLAST search failed after maximum attempts")
 
 
 def query_reactome(

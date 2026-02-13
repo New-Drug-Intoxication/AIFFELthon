@@ -13,6 +13,7 @@ from biomni.llm import get_llm
 
 _GGET_MODULE = None
 _GGET_IMPORT_ERROR: Exception | None = None
+_GGET_MISSING_MESSAGE = "Optional dependency 'gget' is required. Install it with `pip install gget`."
 _GSEAPY_MODULE = None
 _GSEAPY_IMPORT_ERROR: Exception | None = None
 _SCANPY_IMPORT_ERROR: Exception | None = None
@@ -33,13 +34,13 @@ def _require_gget():
         return _GGET_MODULE
 
     if _GGET_IMPORT_ERROR is not None:
-        raise RuntimeError("Optional dependency 'gget' is required. Install it with `pip install gget`.") from _GGET_IMPORT_ERROR
+        raise RuntimeError(_GGET_MISSING_MESSAGE) from _GGET_IMPORT_ERROR
 
     try:
         import gget as gget_module
     except Exception as exc:
         _GGET_IMPORT_ERROR = exc
-        raise RuntimeError("Optional dependency 'gget' is required. Install it with `pip install gget`.") from exc
+        raise RuntimeError(_GGET_MISSING_MESSAGE) from exc
 
     _GGET_MODULE = gget_module
     return _GGET_MODULE
@@ -1076,6 +1077,8 @@ def get_rna_seq_archs4(gene_name: str, K: int = 10) -> str:
         steps_log += readable_output
         return steps_log
 
+    except RuntimeError as e:
+        return str(e)
     except Exception as e:
         return f"An error occurred: {e}"
 
@@ -1152,6 +1155,8 @@ def gene_set_enrichment_analysis(
 
         return steps_log
 
+    except RuntimeError as e:
+        return str(e)
     except Exception as e:
         return f"An error occurred: {e}"
 

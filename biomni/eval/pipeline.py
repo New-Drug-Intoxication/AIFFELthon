@@ -170,6 +170,53 @@ def normalize_prediction_for_scoring(task_name: str, prompt: str, prediction: An
     return text.strip()
 
 
+def _count_tool_calls_from_trajectory(trajectory: list[Any]) -> int:
+    """Estimate tool calls from serialized trajectory entries."""
+    count = 0
+    for step in trajectory:
+        text = ""
+        if isinstance(step, dict):
+            text = str(step.get("content", ""))
+        else:
+            text = str(step)
+        if not text:
+            continue
+
+        execute_hits = len(re.findall(r"<execute>", text, flags=re.IGNORECASE))
+        if execute_hits:
+            count += execute_hits
+            continue
+
+        if "Tool:" in text or "Invoking:" in text or "tool call" in text.lower():
+            count += 1
+    return count
+
+
+def _count_tool_calls_from_agent_state(agent: Any) -> int:
+    """Fallback tool-call counting using the agent's final conversation state."""
+    state = getattr(agent, "_conversation_state", None)
+    if not isinstance(state, dict):
+        return 0
+
+    messages = state.get("messages", [])
+    if not isinstance(messages, list):
+        return 0
+
+    count = 0
+    for message in messages:
+        content = getattr(message, "content", message)
+        text = str(content)
+        observation_hits = len(re.findall(r"<observation>", text, flags=re.IGNORECASE))
+        if observation_hits:
+            # One observation is emitted per execute call.
+            count += observation_hits
+            continue
+
+        # Fallback for cases where observation messages are missing.
+        count += len(re.findall(r"<execute>", text, flags=re.IGNORECASE))
+    return count
+
+
 class EvaluationPipeline:
     def __init__(
         self,
@@ -315,10 +362,9 @@ class EvaluationPipeline:
         end_time = time.time()
         success = score == 1.0
 
-        tool_calls = 0
-        for step in trajectory:
-            if "Tool:" in str(step) or "Invoking:" in str(step):
-                tool_calls += 1
+        tool_calls = _count_tool_calls_from_trajectory(trajectory)
+        if tool_calls == 0:
+            tool_calls = _count_tool_calls_from_agent_state(agent)
 
         return {
             "task_name": task_name,

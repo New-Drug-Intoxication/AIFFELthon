@@ -10,6 +10,13 @@ _DEFAULT_NAMESPACE_IMPORTS = {
     "pd": "pandas",
     "np": "numpy",
 }
+_DEFAULT_NAMESPACE_HELPERS = (
+    "infer_column",
+    "infer_ensembl_gene_id_column",
+    "ensure_unique_columns",
+    "safe_concat",
+    "safe_reindex",
+)
 
 # Global list to store captured plots
 _captured_plots = []
@@ -29,6 +36,11 @@ def _bootstrap_default_namespace() -> None:
             # Optional preload: skip unavailable modules and keep execution alive.
             continue
 
+    for helper_name in _DEFAULT_NAMESPACE_HELPERS:
+        helper = globals().get(helper_name)
+        if callable(helper):
+            _persistent_namespace[helper_name] = helper
+
 
 def reset_python_repl_namespace(preload_defaults: bool = True) -> None:
     """Reset the shared Python REPL namespace.
@@ -40,6 +52,141 @@ def reset_python_repl_namespace(preload_defaults: bool = True) -> None:
     _persistent_namespace = {"__builtins__": __builtins__}
     if preload_defaults:
         _bootstrap_default_namespace()
+
+
+def _normalize_column_token(name: object) -> str:
+    """Normalize a column identifier for robust fuzzy matching."""
+    import re
+
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def infer_column(df, candidates, *, normalize: bool = True):
+    """Infer the best matching DataFrame column from a list of candidate names.
+
+    Args:
+        df: Pandas DataFrame-like object.
+        candidates: Iterable of candidate column names ordered by preference.
+        normalize: If True, compare with normalized tokens (case/punctuation agnostic).
+
+    Returns:
+        The matched column name from `df.columns`, or `None` when no match is found.
+    """
+    columns = list(getattr(df, "columns", []))
+    if not columns:
+        return None
+
+    # Exact match first
+    for cand in candidates:
+        if cand in columns:
+            return cand
+
+    # Case-insensitive match
+    lower_to_column = {str(col).lower(): col for col in columns}
+    for cand in candidates:
+        matched = lower_to_column.get(str(cand).lower())
+        if matched is not None:
+            return matched
+
+    if not normalize:
+        return None
+
+    normalized_to_column = {}
+    for col in columns:
+        token = _normalize_column_token(col)
+        normalized_to_column.setdefault(token, col)
+
+    for cand in candidates:
+        token = _normalize_column_token(cand)
+        if token in normalized_to_column:
+            return normalized_to_column[token]
+
+    return None
+
+
+def infer_ensembl_gene_id_column(df):
+    """Infer likely Ensembl gene identifier column name from a DataFrame.
+
+    This helper handles common schema variants such as `ensembl_gene_id`,
+    `Ensembl Gene ID`, `gene_id`, and fallback detection based on `ENSG...` values.
+    """
+    candidates = [
+        "ensembl_gene_id",
+        "ensembl gene id",
+        "ensembl_id",
+        "gene_ensembl_id",
+        "gene_id",
+        "ensembl",
+        "ensg",
+    ]
+    matched = infer_column(df, candidates, normalize=True)
+    if matched is not None:
+        return matched
+
+    # Value-based fallback: find a column with ENSG-like identifiers.
+    columns = list(getattr(df, "columns", []))
+    for col in columns:
+        try:
+            series = df[col].dropna().astype(str).head(200)
+        except Exception:
+            continue
+        if not series.empty and series.str.startswith("ENSG").mean() >= 0.5:
+            return col
+
+    return None
+
+
+def ensure_unique_columns(df, sep: str = "__dup"):
+    """Return a copy of a DataFrame with guaranteed unique column names."""
+    columns = list(getattr(df, "columns", []))
+    if not columns:
+        return df
+
+    if getattr(df.columns, "is_unique", True):
+        return df
+
+    seen = {}
+    renamed = []
+    for col in columns:
+        key = str(col)
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] == 1:
+            renamed.append(col)
+        else:
+            renamed.append(f"{key}{sep}{seen[key] - 1}")
+
+    out = df.copy()
+    out.columns = renamed
+    return out
+
+
+def safe_concat(frames, axis: int = 0, ignore_index: bool = True, dedup_columns: bool = True, **kwargs):
+    """Safely concatenate DataFrames while optionally deduplicating columns first."""
+    import pandas as pd
+
+    prepared = []
+    for frame in frames:
+        if frame is None:
+            continue
+        if dedup_columns and hasattr(frame, "columns"):
+            prepared.append(ensure_unique_columns(frame))
+        else:
+            prepared.append(frame)
+
+    if not prepared:
+        return pd.DataFrame()
+
+    return pd.concat(prepared, axis=axis, ignore_index=ignore_index, **kwargs)
+
+
+def safe_reindex(df, *args, dedup_columns: bool = True, dedup_index: bool = True, **kwargs):
+    """Safely call DataFrame.reindex after fixing duplicate columns/index when requested."""
+    working = df
+    if dedup_columns and hasattr(working, "columns") and not working.columns.is_unique:
+        working = ensure_unique_columns(working)
+    if dedup_index and hasattr(working, "index") and not working.index.is_unique:
+        working = working.reset_index(drop=True)
+    return working.reindex(*args, **kwargs)
 
 
 def run_python_repl(command: str) -> str:

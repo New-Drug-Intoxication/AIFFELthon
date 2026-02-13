@@ -1,21 +1,17 @@
 {
   "os": "Linux-6.8.0-100-generic-x86_64-with-glibc2.39",
   "python": "CPython 3.11.14",
-  "startedAt": "2026-02-13T06:35:13.544725Z",
+  "startedAt": "2026-02-13T12:29:40.133103Z",
   "args": [
-    "--split",
-    "val",
     "--max-instances",
-    "3",
-    "--db-path",
-    "/tmp/biomni_eval_smoke.db"
+    "1"
   ],
   "program": "/home/aiffel07/wonjin/Biomni/biomni/eval/run_eval.py",
   "codePath": "biomni/eval/run_eval.py",
   "codePathLocal": "biomni/eval/run_eval.py",
   "git": {
     "remote": "https://github.com/snap-stanford/Biomni.git",
-    "commit": "400c1f366b96a35ca253e13c9b06c5076af41d65"
+    "commit": "2d43f6a23b30a2631ccb9ed071f2eef190e77f4b"
   },
   "email": "cwj6705@dankook.ac.kr",
   "root": "/home/aiffel07/wonjin/Biomni",
@@ -28,7 +24,7 @@
   "disk": {
     "/": {
       "total": "502392610816",
-      "used": "276760985600"
+      "used": "276374560768"
     }
   },
   "memory": {
@@ -44,5 +40,5 @@
     }
   ],
   "cudaVersion": "12.8",
-  "writerId": "gfeosfs8dk7ys3ey9zg6vbmzpa13yavq"
+  "writerId": "w8ajuul1a0d38ebs4zcsf57ksibvhfx8"
 }

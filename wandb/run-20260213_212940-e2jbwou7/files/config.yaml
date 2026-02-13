@@ -2,14 +2,10 @@ _wandb:
     value:
         cli_version: 0.24.2
         e:
-            gfeosfs8dk7ys3ey9zg6vbmzpa13yavq:
+            w8ajuul1a0d38ebs4zcsf57ksibvhfx8:
                 args:
-                    - --split
-                    - val
                     - --max-instances
-                    - "3"
-                    - --db-path
-                    - /tmp/biomni_eval_smoke.db
+                    - "1"
                 codePath: biomni/eval/run_eval.py
                 codePathLocal: biomni/eval/run_eval.py
                 cpu_count: 8
@@ -18,11 +14,11 @@ _wandb:
                 disk:
                     /:
                         total: "502392610816"
-                        used: "276760985600"
+                        used: "276374560768"
                 email: cwj6705@dankook.ac.kr
                 executable: /home/aiffel07/anaconda3/envs/biomni_e1/bin/python
                 git:
-                    commit: 400c1f366b96a35ca253e13c9b06c5076af41d65
+                    commit: 2d43f6a23b30a2631ccb9ed071f2eef190e77f4b
                     remote: https://github.com/snap-stanford/Biomni.git
                 gpu: NVIDIA GeForce RTX 2070
                 gpu_count: 1
@@ -39,8 +35,8 @@ _wandb:
                 program: /home/aiffel07/wonjin/Biomni/biomni/eval/run_eval.py
                 python: CPython 3.11.14
                 root: /home/aiffel07/wonjin/Biomni
-                startedAt: "2026-02-13T06:35:13.544725Z"
-                writerId: gfeosfs8dk7ys3ey9zg6vbmzpa13yavq
+                startedAt: "2026-02-13T12:29:40.133103Z"
+                writerId: w8ajuul1a0d38ebs4zcsf57ksibvhfx8
         m: []
         python_version: 3.11.14
         t:
@@ -59,6 +55,7 @@ _wandb:
                 - 95
                 - 105
             "3":
+                - 2
                 - 16
             "4": 3.11.14
             "5": 0.24.2
@@ -72,11 +69,11 @@ benchmark:
 benchmark_id:
     value: biomni_eval1
 db_path:
-    value: /tmp/biomni_eval_smoke.db
+    value: biomni_eval.db
 llm:
     value: null
 max_instances:
-    value: 3
+    value: 1
 no_wandb:
     value: false
 path:
@@ -100,7 +97,7 @@ tasks:
 test_time_scale_round:
     value: 0
 timestamp:
-    value: 1.7709645165883818e+09
+    value: 1.770985783240563e+09
 wandb_entity:
     value: null
 wandb_name:
