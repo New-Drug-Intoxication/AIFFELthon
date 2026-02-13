@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import zipfile
@@ -1375,6 +1376,91 @@ def batch_register_images(
 
     logger.info(f"Batch registration completed. Processed {len(image_files)} images.")
     return results
+
+
+def create_registration_visualization(
+    fixed_image_path: str,
+    moving_image_path: str,
+    registered_image_path: str,
+    output_dir: str,
+    prefix: str = "registration",
+) -> dict:
+    """Create deterministic visualization artifacts for image registration results."""
+    import matplotlib.pyplot as plt
+
+    tool = ImageRegistrationTool()
+    os.makedirs(output_dir, exist_ok=True)
+
+    fixed_image = tool.load_image(fixed_image_path)
+    moving_image = tool.load_image(moving_image_path)
+    registered_image = tool.load_image(registered_image_path)
+
+    fixed_np = sitk.GetArrayFromImage(fixed_image)
+    moving_np = sitk.GetArrayFromImage(moving_image)
+    registered_np = sitk.GetArrayFromImage(registered_image)
+
+    if fixed_np.ndim < 3 or moving_np.ndim < 3 or registered_np.ndim < 3:
+        raise ValueError("Expected 3D medical images for registration visualization.")
+
+    slice_idx = fixed_np.shape[0] // 2
+    fixed_slice = fixed_np[slice_idx]
+    moving_slice = moving_np[slice_idx]
+    registered_slice = registered_np[slice_idx]
+
+    # Comparison panel.
+    comparison_path = os.path.join(output_dir, f"{prefix}_comparison.png")
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    axes[0].imshow(fixed_slice, cmap="gray")
+    axes[0].set_title("Fixed")
+    axes[1].imshow(moving_slice, cmap="gray")
+    axes[1].set_title("Moving (Before)")
+    axes[2].imshow(registered_slice, cmap="gray")
+    axes[2].set_title("Registered (After)")
+    for ax in axes:
+        ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(comparison_path, dpi=150)
+    plt.close(fig)
+
+    # Difference panel.
+    difference_path = os.path.join(output_dir, f"{prefix}_difference.png")
+    before_diff = moving_slice - fixed_slice
+    after_diff = registered_slice - fixed_slice
+    vmax = float(max(abs(before_diff).max(), abs(after_diff).max(), 1e-6))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    im0 = axes[0].imshow(before_diff, cmap="bwr", vmin=-vmax, vmax=vmax)
+    axes[0].set_title("Before - Fixed")
+    axes[0].axis("off")
+    im1 = axes[1].imshow(after_diff, cmap="bwr", vmin=-vmax, vmax=vmax)
+    axes[1].set_title("After - Fixed")
+    axes[1].axis("off")
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(difference_path, dpi=150)
+    plt.close(fig)
+
+    metrics_before = tool.calculate_similarity_metrics(fixed_image, moving_image)
+    metrics_after = tool.calculate_similarity_metrics(fixed_image, registered_image)
+    metrics_summary = {
+        "fixed_image_path": fixed_image_path,
+        "moving_image_path": moving_image_path,
+        "registered_image_path": registered_image_path,
+        "slice_index": int(slice_idx),
+        "metrics_before": metrics_before,
+        "metrics_after": metrics_after,
+    }
+    metrics_path = os.path.join(output_dir, f"{prefix}_metrics.json")
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics_summary, f, indent=2)
+
+    return {
+        "comparison_figure_path": comparison_path,
+        "difference_figure_path": difference_path,
+        "metrics_json_path": metrics_path,
+        "metrics_before": metrics_before,
+        "metrics_after": metrics_after,
+    }
 
 
 def calculate_similarity_metrics(image1_path: str, image2_path: str) -> dict[str, float]:

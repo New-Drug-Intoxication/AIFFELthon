@@ -5,9 +5,41 @@ from io import StringIO
 
 # Create a persistent namespace that will be shared across all executions
 _persistent_namespace = {}
+_DEFAULT_NAMESPACE_IMPORTS = {
+    "os": "os",
+    "pd": "pandas",
+    "np": "numpy",
+}
 
 # Global list to store captured plots
 _captured_plots = []
+
+
+def _bootstrap_default_namespace() -> None:
+    """Ensure commonly used modules are preloaded into the persistent namespace."""
+    global _persistent_namespace
+
+    _persistent_namespace.setdefault("__builtins__", __builtins__)
+    for alias, module_name in _DEFAULT_NAMESPACE_IMPORTS.items():
+        if alias in _persistent_namespace:
+            continue
+        try:
+            _persistent_namespace[alias] = __import__(module_name)
+        except Exception:
+            # Optional preload: skip unavailable modules and keep execution alive.
+            continue
+
+
+def reset_python_repl_namespace(preload_defaults: bool = True) -> None:
+    """Reset the shared Python REPL namespace.
+
+    Args:
+        preload_defaults: If True, preload commonly used aliases (`pd`, `np`, `os`).
+    """
+    global _persistent_namespace
+    _persistent_namespace = {"__builtins__": __builtins__}
+    if preload_defaults:
+        _bootstrap_default_namespace()
 
 
 def run_python_repl(command: str) -> str:
@@ -24,6 +56,8 @@ def run_python_repl(command: str) -> str:
         global _persistent_namespace
 
         try:
+            _bootstrap_default_namespace()
+
             # Apply matplotlib monkey patches before execution
             _apply_matplotlib_patches()
 
@@ -42,6 +76,9 @@ def run_python_repl(command: str) -> str:
 
     command = command.strip("```").strip()
     return execute_in_repl(command)
+
+
+reset_python_repl_namespace(preload_defaults=True)
 
 
 def _capture_matplotlib_plots():

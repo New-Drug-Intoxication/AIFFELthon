@@ -56,7 +56,7 @@ def _query_llm_for_api(prompt, schema, system_template):
         model = default_config.llm
         api_key = default_config.api_key
     except ImportError:
-        model = "claude-3-5-haiku-20241022"
+        model = "gpt-4o-mini"
         api_key = None
 
     try:
@@ -83,7 +83,30 @@ def _query_llm_for_api(prompt, schema, system_template):
 
         # Query the LLM
         response = llm.invoke(messages)
-        llm_text = response.content.strip()
+
+        # Handle different content types (string or list of content blocks)
+        if isinstance(response.content, list):
+            # If content is a list (e.g. from Claude 3), join text parts
+            llm_text = "".join(
+                [
+                    block.get("text", "")
+                    for block in response.content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+            ).strip()
+            # Also handle if list elements are strings directly or objects with text attribute
+            if not llm_text:
+                # Try accessing text attribute if objects
+                parts = []
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        parts.append(block.text)
+                    elif isinstance(block, str):
+                        parts.append(block)
+                llm_text = "".join(parts).strip()
+        else:
+            # Standard string content
+            llm_text = response.content.strip()
 
         # Find JSON boundaries (in case LLM adds explanations)
         json_start = llm_text.find("{")

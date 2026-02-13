@@ -37,3 +37,9 @@ dependencies:
       - mcp
       - tooluniverse
       - python-dotenv
+      - nibabel
+      - torch
+      - esm
+      - scholarly
+      - wandb
+      - gget

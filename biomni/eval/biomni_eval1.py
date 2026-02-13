@@ -38,7 +38,35 @@ class BiomniEval1:
 
         print(f"Loaded BiomniEval1 dataset: {len(self.df)} instances across {self.df['task_name'].nunique()} tasks")
 
-    def evaluate(self, task_name: str, task_instance_id: int, user_answer: str) -> float:
+    @staticmethod
+    def _flatten_content_blocks(value: Any) -> str:
+        if value is None:
+            return ""
+
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                        continue
+                    content = item.get("content")
+                    if isinstance(content, str):
+                        parts.append(content)
+                        continue
+                parts.append(str(item))
+            return "\n".join(parts)
+
+        return str(value)
+
+    @classmethod
+    def _coerce_text(cls, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return cls._flatten_content_blocks(value)
+
+    def evaluate(self, task_name: str, task_instance_id: int, user_answer: Any) -> float:
         """
         Evaluate a user's answer for a given task and instance
 
@@ -68,28 +96,30 @@ class BiomniEval1:
             # Preserve original traceback context for easier debugging
             raise RuntimeError(f"Error computing reward for {task_name} instance {task_instance_id}: {e}") from e
 
-    def _compute_reward(self, task_name: str, user_answer: str, ground_truth: str) -> float:
+    def _compute_reward(self, task_name: str, user_answer: Any, ground_truth: Any) -> float:
         """Compute reward using task-specific logic"""
+        user_answer_text = self._coerce_text(user_answer)
+        ground_truth_text = self._coerce_text(ground_truth)
 
         if task_name == "crispr_delivery":
             # CRISPR expects answer as a letter (a-f), exact match
-            return 1.0 if user_answer.strip().lower() == ground_truth.strip().lower() else 0.0
+            return 1.0 if user_answer_text.strip().lower() == ground_truth_text.strip().lower() else 0.0
 
         elif task_name.startswith("gwas_causal_gene"):
             # GWAS causal gene expects exact gene match (case-insensitive)
-            return 1.0 if user_answer.strip().upper() == ground_truth.strip().upper() else 0.0
+            return 1.0 if user_answer_text.strip().upper() == ground_truth_text.strip().upper() else 0.0
 
         elif task_name == "gwas_variant_prioritization":
             # GWAS variant expects exact variant match
-            return 1.0 if user_answer.strip() == ground_truth.strip() else 0.0
+            return 1.0 if user_answer_text.strip() == ground_truth_text.strip() else 0.0
 
         elif task_name == "hle":
             # HLE expects letter answer (A-Z), case-insensitive
-            return 1.0 if user_answer.strip().upper() == ground_truth.strip().upper() else 0.0
+            return 1.0 if user_answer_text.strip().upper() == ground_truth_text.strip().upper() else 0.0
 
         elif task_name.startswith("lab_bench"):
             # Lab bench expects letter answer (A-Z), case-insensitive
-            return 1.0 if user_answer.strip().upper() == ground_truth.strip().upper() else 0.0
+            return 1.0 if user_answer_text.strip().upper() == ground_truth_text.strip().upper() else 0.0
 
         elif task_name == "rare_disease_diagnosis":
             # Rare disease expects JSON with OMIM_ID match
@@ -102,11 +132,21 @@ class BiomniEval1:
                         import ast
 
                         user_dict = ast.literal_eval(user_answer)
+                elif isinstance(user_answer, list):
+                    raw_text = self._flatten_content_blocks(user_answer)
+                    try:
+                        user_dict = json.loads(raw_text)
+                    except json.JSONDecodeError:
+                        import ast
+
+                        user_dict = ast.literal_eval(raw_text)
                 else:
                     user_dict = user_answer
 
                 if isinstance(ground_truth, str):
                     gt_dict = json.loads(ground_truth)
+                elif isinstance(ground_truth, list):
+                    gt_dict = json.loads(self._flatten_content_blocks(ground_truth))
                 else:
                     gt_dict = ground_truth
 
@@ -118,7 +158,7 @@ class BiomniEval1:
 
         elif task_name == "screen_gene_retrieval":
             # Screen gene retrieval expects gene symbol (case-insensitive)
-            return 1.0 if user_answer.strip().upper() == ground_truth.strip().upper() else 0.0
+            return 1.0 if user_answer_text.strip().upper() == ground_truth_text.strip().upper() else 0.0
 
         elif task_name == "patient_gene_detection":
             # Patient gene detection expects JSON with causal_gene list
@@ -131,6 +171,14 @@ class BiomniEval1:
                         import ast
 
                         user_dict = ast.literal_eval(user_answer)
+                elif isinstance(user_answer, list):
+                    raw_text = self._flatten_content_blocks(user_answer)
+                    try:
+                        user_dict = json.loads(raw_text)
+                    except json.JSONDecodeError:
+                        import ast
+
+                        user_dict = ast.literal_eval(raw_text)
                 else:
                     user_dict = user_answer
 
@@ -138,12 +186,13 @@ class BiomniEval1:
                 predicted_genes = user_dict.get("causal_gene", [])
                 if not isinstance(predicted_genes, list):
                     predicted_genes = [predicted_genes]
+                predicted_genes = [self._coerce_text(x).strip() for x in predicted_genes if self._coerce_text(x).strip()]
 
                 # Get ground truth genes (stored as comma-separated or single)
-                if "," in ground_truth:
-                    true_genes = [g.strip() for g in ground_truth.split(",")]
+                if "," in ground_truth_text:
+                    true_genes = [g.strip() for g in ground_truth_text.split(",")]
                 else:
-                    true_genes = [ground_truth]
+                    true_genes = [ground_truth_text.strip()]
 
                 # Check for intersection
                 if predicted_genes and set(true_genes) & set(predicted_genes):

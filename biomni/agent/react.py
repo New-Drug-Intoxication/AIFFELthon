@@ -67,7 +67,10 @@ class react:
         tools = []
         for module, api_list in module2api.items():
             print("Registering tools from module:", module)
-            tools += [api_schema_to_langchain_tool(api, mode="custom_tool", module_name=module) for api in api_list]
+            try:
+                tools += [api_schema_to_langchain_tool(api, mode="custom_tool", module_name=module) for api in api_list]
+            except Exception as e:
+                print(f"Skipping module {module} due to error: {e}")
         self.tools = tools
         self.module2api = module2api
         self.use_tool_retriever = use_tool_retriever

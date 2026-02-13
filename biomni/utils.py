@@ -316,16 +316,16 @@ def get_all_functions_from_file(file_path):
 
 
 def write_python_code(request: str):
-    from langchain_anthropic import ChatAnthropic
+    from langchain_openai import ChatOpenAI
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
 
-    model = ChatAnthropic(model="claude-3-5-sonnet-20240620")
+    model = ChatOpenAI(model="gpt-4o")
     template = """Write some python code to solve the user's problem.
 
     Return only python code in Markdown format, e.g.:
 
-    ```python
+    ````python
     ....
     ```"""
     prompt = ChatPromptTemplate.from_messages([("system", template), ("human", "{input}")])

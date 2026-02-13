@@ -52,8 +52,8 @@ def parse_arguments():
     parser.add_argument(
         "--model",
         type=str,
-        default="claude-3-haiku-20240307",
-        help="LLM model to use for extraction (default: claude-3-haiku-20240307)",
+        default="gpt-4o-mini",
+        help="LLM model to use for extraction (default: gpt-4o-mini)",
     )
     parser.add_argument(
         "--chunk-size",

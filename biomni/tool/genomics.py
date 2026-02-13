@@ -2,17 +2,78 @@ import os
 from pathlib import Path
 
 import esm
-import gget
-import gseapy
 import numpy as np
 import pandas as pd
 import requests
-import scanpy as sc
 import torch
 from pybiomart import Dataset
 from tqdm import tqdm
 
 from biomni.llm import get_llm
+
+_GGET_MODULE = None
+_GGET_IMPORT_ERROR: Exception | None = None
+_GSEAPY_MODULE = None
+_GSEAPY_IMPORT_ERROR: Exception | None = None
+_SCANPY_IMPORT_ERROR: Exception | None = None
+
+try:
+    import scanpy as sc
+except Exception as exc:
+    sc = None
+    _SCANPY_IMPORT_ERROR = exc
+
+
+def _require_gget():
+    """Load gget lazily so the whole module can import without optional dependency."""
+    global _GGET_MODULE
+    global _GGET_IMPORT_ERROR
+
+    if _GGET_MODULE is not None:
+        return _GGET_MODULE
+
+    if _GGET_IMPORT_ERROR is not None:
+        raise RuntimeError("Optional dependency 'gget' is required. Install it with `pip install gget`.") from _GGET_IMPORT_ERROR
+
+    try:
+        import gget as gget_module
+    except Exception as exc:
+        _GGET_IMPORT_ERROR = exc
+        raise RuntimeError("Optional dependency 'gget' is required. Install it with `pip install gget`.") from exc
+
+    _GGET_MODULE = gget_module
+    return _GGET_MODULE
+
+
+def _require_gseapy():
+    """Load gseapy lazily so missing optional dependency doesn't break module import."""
+    global _GSEAPY_MODULE
+    global _GSEAPY_IMPORT_ERROR
+
+    if _GSEAPY_MODULE is not None:
+        return _GSEAPY_MODULE
+
+    if _GSEAPY_IMPORT_ERROR is not None:
+        raise RuntimeError("Optional dependency 'gseapy' is required. Install it with `pip install gseapy`.") from _GSEAPY_IMPORT_ERROR
+
+    try:
+        import gseapy as gseapy_module
+    except Exception as exc:
+        _GSEAPY_IMPORT_ERROR = exc
+        raise RuntimeError("Optional dependency 'gseapy' is required. Install it with `pip install gseapy`.") from exc
+
+    _GSEAPY_MODULE = gseapy_module
+    return _GSEAPY_MODULE
+
+
+def _require_scanpy():
+    """Return scanpy module or raise a clear runtime error."""
+    if sc is None:
+        raise RuntimeError(
+            "Optional dependency 'scanpy' is unavailable in this environment. "
+            "Install/fix scanpy and retry."
+        ) from _SCANPY_IMPORT_ERROR
+    return sc
 
 
 def unsupervised_celltype_transfer_between_scRNA_datasets(
@@ -466,7 +527,7 @@ def annotate_celltype_scRNA(
     data_info,
     data_lake_path,
     cluster="leiden",
-    llm="claude-3-5-sonnet-20241022",
+    llm="gpt-4o",
     composition=None,
 ):
     """Annotate cell types based on gene markers and transferred labels using LLM.
@@ -507,6 +568,7 @@ def annotate_celltype_scRNA(
 
     # from langchain.chains import LLMChain
 
+    sc = _require_scanpy()
     steps = []
     steps.append(f"Loading AnnData from {data_dir}/{adata_filename}")
     adata = sc.read_h5ad(f"{data_dir}/{adata_filename}")
@@ -805,6 +867,7 @@ def create_scvi_embeddings_scRNA(adata_filename, batch_key, label_key, data_dir)
     except ImportError:
         return "Please install scvi-tools: pip install scvi-tools"
 
+    sc = _require_scanpy()
     steps = []
     steps.append(f"Loading AnnData from {data_dir}/{adata_filename}")
     adata = sc.read_h5ad(f"{data_dir}/{adata_filename}")
@@ -843,6 +906,7 @@ def create_harmony_embeddings_scRNA(adata_filename, batch_key, data_dir):
     # https://pypi.org/project/harmony-pytorch/
     from harmony import harmonize
 
+    sc = _require_scanpy()
     steps = []
     steps.append(f"Loading AnnData from {data_dir}/{adata_filename}")
     adata = sc.read_h5ad(f"{data_dir}/{adata_filename}")
@@ -915,6 +979,7 @@ def map_to_ima_interpret_scRNA(adata_filename, data_dir, custom_args=None):
     """Map cell embeddings from the input dataset to the Integrated Megascale Atlas reference dataset using UCE embeddings."""
     from sklearn.neighbors import NearestNeighbors
 
+    sc = _require_scanpy()
     steps = []
     steps.append(f"Loading AnnData from {data_dir}/{adata_filename}")
     adata = sc.read_h5ad(f"{data_dir}/{adata_filename}")
@@ -988,6 +1053,7 @@ def get_rna_seq_archs4(gene_name: str, K: int = 10) -> str:
     steps_log = f"Starting RNA-seq data fetch for gene: {gene_name} with K: {K}\n"
 
     try:
+        gget = _require_gget()
         # Fetch RNA-seq data using gget
         steps_log += "Fetching RNA-seq data using gget.archs4...\n"
         data = gget.archs4(gene_name, which="tissue")
@@ -1015,6 +1081,7 @@ def get_rna_seq_archs4(gene_name: str, K: int = 10) -> str:
 
 
 def get_gene_set_enrichment_analysis_supported_database_list() -> list:
+    gseapy = _require_gseapy()
     return gseapy.get_library_name()
 
 
@@ -1057,6 +1124,7 @@ def gene_set_enrichment_analysis(
         steps_log += f"Using background list with {len(background_list)} genes.\n"
 
     try:
+        gget = _require_gget()
         # Perform enrichment analysis with or without background list
         steps_log += f"Performing enrichment analysis using gget.enrichr with the {database} database...\n"
         df = gget.enrichr(genes, database=database, background_list=background_list, plot=plot)

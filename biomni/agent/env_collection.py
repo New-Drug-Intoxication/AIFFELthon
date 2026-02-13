@@ -16,7 +16,7 @@ class PaperTaskExtractor(base_agent):
 
     def __init__(
         self,
-        llm="claude-3-7-sonnet-20250219",
+        llm="gpt-4o",
         cheap_llm=None,
         tools=None,
         chunk_size=4000,

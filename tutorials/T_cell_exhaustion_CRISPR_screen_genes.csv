@@ -1,0 +1,33 @@
+Rank,Gene,Category,Rationale,sgRNA_1,sgRNA_2,sgRNA_3
+1,TOX,Core Exhaustion Regulators,Master regulator of T cell exhaustion program; essential for exhaustion development,ATCACGAAAGAATAACGCAT,ATAGTGGGAACTTAGGTACA,GCAGGCCATTATGGTTCATG
+2,PDCD1,Core Exhaustion Regulators,PD-1 checkpoint; primary inhibitory receptor in exhausted T cells,CCCTTCGGTCACCACGAGCA,CCATAGTCCACAGAGAACAC,AGCCGGCCAGTTCCAAACCC
+3,HAVCR2,Core Exhaustion Regulators,TIM-3; co-inhibitory receptor marking terminal exhaustion,AGAGAACGTATATGAAGTGG,TAGGCATCTACATCGGAGCA,TCTCTGCCGAGTCGGTGCAG
+4,LAG3,Core Exhaustion Regulators,LAG-3; inhibitory receptor that limits TCR signaling,GTTCCGGAACCAATGCACAG,GGAACCAATGCACAGAGGCT,GGCTCACATCCTCTAGTCGA
+5,NR4A1,Core Exhaustion Regulators,Induced by chronic TCR stimulation; promotes exhaustion phenotype,GGCTAACAAGGACTGCCCTG,TACACCCGTGACCTCAACCA,ATGTGCGGACACCATAATGC
+6,NFATC1,Core Exhaustion Regulators,Chronic NFAT activation drives exhaustion transcriptional program,CCACCGAGCCCACTACGAGA,GAGCGAGTGTTCGAGACCAG,AGAGCGAGTGTTCGAGACCA
+7,TIGIT,Inhibitory Receptors,Inhibitory receptor competing with CD226 for ligand binding,AGTGTACGTCCCATCAGGGT,GCTGACCGTGAACGATACAG,CAGGCACAATAGAAACAACG
+8,CTLA4,Inhibitory Receptors,Early checkpoint receptor; blocks CD28 costimulation,AAGAAGCCCTCTTACAACAG,TGCCCAGGTAGTATGGCGGT,TACCCACCGCCATACTACCT
+9,BTLA,Inhibitory Receptors,Inhibitory receptor; HVEM ligand; suppresses T cell responses,AGTAGAGGCAATCCCCCCAA,CATTGGACCGAACTCAAGAC,AGTAAACGATACAGGAGCCA
+10,NR4A2,Transcriptional Regulators,NR4A family member; redundant exhaustion-promoting functions,ATTACCTGTATGCTAATCGA,AGGTGCGCACGCCGTAGTGT,CATCTGGCAACTAGACACCG
+11,PRDM1,Transcriptional Regulators,BLIMP-1; drives terminal differentiation and exhaustion,GGACGCGTTCAAGTAAGCGT,GGGTAGTGAGCGTTGTACGA,GGGGTAGTGAGCGTTGTACG
+12,EOMES,Transcriptional Regulators,T-box TF; upregulated in exhausted T cells,GGCGTGACAAGCCACCGCTG,TTCACCCCAACAGAGCGAAG,TGCTGGCGGACCCCAACCAC
+13,TBX21,Transcriptional Regulators,T-bet; balance between effector and exhaustion programs,TAAACTTGGACCACAACAGG,ACCTCAACGATATGCAGCCG,CATATCGTTGAGGTGAACGA
+14,IRF4,Transcriptional Regulators,Senses TCR signal strength; regulates exhaustion vs effector fate,CTGATCGACCAGATCGACAG,TCTGGTCGATCAGCCACTGG,TTTCGCATAGAGCCCGTCGG
+15,ZAP70,TCR Signaling,Critical TCR signaling kinase; required for T cell activation,TTGCTACGACGGCCCACGAG,GGCAAGTACTGCATTCCCGA,ACACCGTCTTCCCATAGATG
+16,LCK,TCR Signaling,Src kinase; proximal TCR signaling; phosphorylates CD3 ITAMs,GCTGGTTCGGCTCTACGCTG,AGGAGCTGTACCAACTCATG,CTACAACGGGCACACGAAGG
+17,LAT,TCR Signaling,Adaptor protein; nucleates TCR signaling complexes,GTGGCGAGCTACGAGAACGA,GGCACTGTCTCGGATGCCAG,TGTGGCGAGCTACGAGAACG
+18,PLCG1,TCR Signaling,PLCγ1; calcium mobilization and DAG production,AGGTGGCGAGGGGACTACGG,GCTGCGCTATCCCATCAACG,TCAAACTCATTACAGCGCAG
+19,PRKCQ,TCR Signaling,PKCθ; activates NF-κB pathway downstream of TCR,TACTGTACCAGACAAACTCG,CCTCTTACTTACGTCGGCAC,AATTCTTAAACGAGAAGCCC
+20,CD28,Costimulation,Primary costimulatory receptor; synergizes with TCR,ATTGTCGTACGCTACAAGCA,GCTTGTAGCGTACGACAATG,CGATAGGCTGCGAAGTCGCG
+21,ICOS,Costimulation,Inducible costimulator; maintains T cell responses,TCCAGTGTGCACGACCCTAA,ATGTTTATATTTCACAACGG,ACAGATGTGACCCTATAATA
+22,TNFRSF9,Costimulation,4-1BB; provides survival signals to T cells,AACGTGGCATCTGTCGACCC,GTTACCTGGCTCTCTCGCAG,ACATTTAACGATCAGAAACG
+23,IL2RA,IL-2/Cytokine Signaling,CD25; high-affinity IL-2 receptor; marks activated T cells,GGATACAGGGCTCTACACAG,TCAGTGCGTCCAGGGATACA,TGTGTAGAGCCCTGTATCCC
+24,IL2RB,IL-2/Cytokine Signaling,IL-2Rβ; signal transduction component of IL-2 receptor,GCTGGGAAAAGAACTTCGAG,TACTTACGACCCCTACTCAG,GTGTCTTTCAAAGTAGTGGG
+25,JAK1,IL-2/Cytokine Signaling,JAK kinase; transduces cytokine receptor signals,ATGTTGTGGACGATCAACGG,AAAATGATAGGCCCAACCCA,TATGTTGTGGACGATCAACG
+26,STAT5A,IL-2/Cytokine Signaling,Transcription factor; mediates IL-2 signaling responses,TCACAGCGGAACGCAACCTG,GGGACTCACCGGCTCAGCAA,AGTAGTGCCGGACCTCGATG
+27,MYC,Metabolism,Metabolic reprogramming; controls T cell activation and exhaustion,GACGGACAGGATGTATGCTG,CATCCTGTCCGTCCAAGCAG,CTCCGGGATCTGGTCACGCA
+28,HIF1A,Metabolism,Hypoxia response; links metabolism to exhaustion,AAGTGTACCCTAACTAGCCG,ACAGTAACCAACCTCAGTGT,GATGGTAAGCCTCATCACAG
+29,SLC2A1,Metabolism,GLUT1; glucose transporter; metabolic gatekeeper,CCTGCTCATCAACCGCAACG,GATGTCCTATCTGAGCATCG,GACGATACCGGAGCCAATGG
+30,EZH2,Epigenetic Regulation,Polycomb protein; H3K27me3; epigenetic silencing in exhaustion,CAAGGGCACGAACTGTCACA,GGTCCCAATTAACCTAGCAA,ATTGCTGGCACCATCTGACG
+31,TET2,Epigenetic Regulation,DNA demethylase; regulates exhaustion epigenetic landscape,AATCCCATGAACCCTTACCC,GGTAGACTGAGCTTAGACAG,GGGCCGTCTCATGTATGGAT
+32,BCL2,Survival/Apoptosis,Anti-apoptotic protein; controls T cell survival,ACCTGGATCCAGGATAACGG,TGGACATCTCGGCGAAGTCG,TGGTGGACAACATCGCCCTG

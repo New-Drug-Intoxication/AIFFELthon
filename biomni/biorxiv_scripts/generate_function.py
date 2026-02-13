@@ -29,8 +29,8 @@ def main():
         "--model",
         "-m",
         type=str,
-        default="claude-3-7-sonnet-latest",
-        help="LLM model to use (default: claude-3-7-sonnet-latest)",
+        default="gpt-4o",
+        help="LLM model to use (default: gpt-4o)",
     )
     parser.add_argument(
         "--temperature",

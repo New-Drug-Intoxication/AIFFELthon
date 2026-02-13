@@ -29,11 +29,11 @@ class BiomniConfig:
     """
 
     # Data and execution settings
-    path: str = "./data"
+    path: str = "./data/biomni_data"
     timeout_seconds: int = 600
 
     # LLM settings (API keys still from environment)
-    llm: str = "claude-sonnet-4-5"
+    llm: str = "gpt-5-mini"
     temperature: float = 0.7
 
     # Tool settings
