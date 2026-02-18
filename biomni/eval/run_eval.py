@@ -18,7 +18,7 @@ def get_benchmark(benchmark_id: str):
     if benchmark_id == "biomni_eval1":
         return BiomniEval1Adapter()
     elif benchmark_id == "lab_bench":
-        return LabBenchAdapter()
+        return LabBenchAdapter(local_root=default_config.path)
     elif benchmark_id == "bixbench":
         return BixBenchAdapter()
     else:

@@ -43,3 +43,5 @@ dependencies:
       - scholarly
       - wandb
       - gget
+      - datasets
+      - huggingface-hub

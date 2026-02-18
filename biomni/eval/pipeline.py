@@ -278,13 +278,18 @@ class EvaluationPipeline:
         print(f"Starting evaluation on {len(tasks)} tasks: {tasks}")
         print(f"Total instances to evaluate: {total_instances}")
 
+        task_summaries: list[dict[str, Any]] = []
+
         with tqdm(total=total_instances, desc="Overall Progress", unit="inst") as pbar:
             for task_name in tasks:
-                self._evaluate_task(task_name, split, pbar)
+                summary = self._evaluate_task(task_name, split, pbar)
+                if summary is not None:
+                    task_summaries.append(summary)
 
+        self._print_summary(task_summaries)
         self.logger.finish()
 
-    def _evaluate_task(self, task_name: str, split: str, pbar: tqdm):
+    def _evaluate_task(self, task_name: str, split: str, pbar: tqdm) -> dict[str, Any] | None:
         pbar.write(f"\n=== Evaluating Task: {task_name} ===")
         instances = self.benchmark.get_instances(task_name, split)
 
@@ -322,6 +327,41 @@ class EvaluationPipeline:
             }
             self.logger.log_metrics(task_metrics)
             pbar.write(f"Task {task_name} finished. Accuracy: {task_metrics[f'{task_name}/accuracy']:.2f}")
+
+            return {
+                "task_name": task_name,
+                "instances": len(instances),
+                "accuracy": task_metrics[f"{task_name}/accuracy"],
+                "avg_score": task_metrics[f"{task_name}/avg_score"],
+                "successes": success_count,
+            }
+
+        return {
+            "task_name": task_name,
+            "instances": 0,
+            "accuracy": 0.0,
+            "avg_score": 0.0,
+            "successes": 0,
+        }
+
+    def _print_summary(self, task_summaries: list[dict[str, Any]]):
+        if not task_summaries:
+            print("No task results to summarize.")
+            return
+
+        print("\n=== Evaluation Summary (per task) ===")
+        total_instances = sum(item["instances"] for item in task_summaries)
+        total_success = sum(item["successes"] for item in task_summaries)
+        for item in task_summaries:
+            task_name = item["task_name"]
+            print(
+                f"{task_name}: accuracy={item['accuracy']:.4f} "
+                f"({item['successes']}/{item['instances']}), "
+                f"avg_score={item['avg_score']:.4f}"
+            )
+
+        overall_accuracy = (total_success / total_instances) if total_instances else 0.0
+        print(f"Overall: accuracy={overall_accuracy:.4f} ({total_success}/{total_instances})")
 
     def _process_instance(self, agent: Any, task_name: str, instance: Dict[str, Any]) -> Dict[str, Any]:
         prompt = instance["prompt"]
