@@ -3,10 +3,13 @@ import pandas as pd
 from biomni.tool.support_tools import (
     ensure_unique_columns,
     infer_ensembl_gene_id_column,
+    preview,
     reset_python_repl_namespace,
     run_python_repl,
     safe_concat,
     safe_reindex,
+    summarize_df,
+    summarize_dict,
 )
 
 
@@ -33,7 +36,10 @@ def test_default_aliases_are_preloaded():
         "print(np.__name__)\n"
         "print(os.__name__)\n"
         "print(callable(infer_ensembl_gene_id_column))\n"
-        "print(callable(safe_concat))"
+        "print(callable(safe_concat))\n"
+        "print(callable(preview))\n"
+        "print(callable(summarize_df))\n"
+        "print(callable(summarize_dict))"
     )
     assert "pandas" in output
     assert "numpy" in output
@@ -58,3 +64,10 @@ def test_safe_helpers_handle_duplicate_columns_and_index():
 
     deduped = ensure_unique_columns(left)
     assert deduped.columns.is_unique
+
+
+def test_print_is_not_overridden_in_repl():
+    reset_python_repl_namespace(preload_defaults=True)
+    output = run_python_repl("import builtins\nprint(print.__name__)\nprint(print is builtins.print)")
+    assert "print" in output
+    assert "True" in output

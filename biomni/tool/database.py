@@ -14,6 +14,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from biomni.llm import get_llm
 from biomni.utils import parse_hpo_obo
 
+DEFAULT_HTTP_CONNECT_TIMEOUT = float(os.getenv("BIOMNI_HTTP_CONNECT_TIMEOUT", "10"))
+DEFAULT_HTTP_READ_TIMEOUT = float(os.getenv("BIOMNI_HTTP_READ_TIMEOUT", "90"))
+DEFAULT_HTTP_TIMEOUT = (DEFAULT_HTTP_CONNECT_TIMEOUT, DEFAULT_HTTP_READ_TIMEOUT)
+
 
 # Function to map HPO terms to names
 def get_hpo_names(hpo_terms: list[str], data_lake_path: str) -> list[str]:
@@ -152,7 +156,7 @@ def _query_llm_for_api(prompt, schema, system_template):
         return {"success": False, "error": f"Error querying LLM: {str(e)}"}
 
 
-def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data=None, description=None):
+def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data=None, description=None, timeout=None):
     """General helper function to query REST APIs with consistent error handling.
 
     Parameters
@@ -163,6 +167,7 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
     headers (dict, optional): HTTP headers for the request
     json_data (dict, optional): JSON data for POST requests
     description (str, optional): Description of this query for error messages
+    timeout (float | tuple, optional): Request timeout. Defaults to BIOMNI_HTTP_* settings.
 
     Returns
     -------
@@ -176,15 +181,17 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
     # Set default description if not provided
     if description is None:
         description = f"{method} request to {endpoint}"
+    if timeout is None:
+        timeout = DEFAULT_HTTP_TIMEOUT
 
     url_error = None
 
     try:
         # Make the API request
         if method.upper() == "GET":
-            response = requests.get(endpoint, params=params, headers=headers)
+            response = requests.get(endpoint, params=params, headers=headers, timeout=timeout)
         elif method.upper() == "POST":
-            response = requests.post(endpoint, params=params, headers=headers, json=json_data)
+            response = requests.post(endpoint, params=params, headers=headers, json=json_data, timeout=timeout)
         else:
             return {"error": f"Unsupported HTTP method: {method}"}
 
@@ -204,6 +211,7 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
                 "endpoint": endpoint,
                 "method": method,
                 "description": description,
+                "timeout": timeout,
             },
             "result": result,
         }
@@ -234,6 +242,7 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
                 "endpoint": endpoint,
                 "method": method,
                 "description": description,
+                "timeout": timeout,
             },
             "response_url_error": url_error,
             "response_text": response_text,

@@ -1,5 +1,6 @@
 import base64
 import io
+import re
 import sys
 from io import StringIO
 
@@ -16,7 +17,17 @@ _DEFAULT_NAMESPACE_HELPERS = (
     "ensure_unique_columns",
     "safe_concat",
     "safe_reindex",
+    "preview",
+    "summarize_df",
+    "summarize_dict",
 )
+
+_DEFAULT_DF_HEAD_ROWS = 5
+_DEFAULT_DICT_TOP_N = 20
+_DEFAULT_LIST_TOP_N = 20
+_DEFAULT_MAX_CHARS = 500
+MAX_OUTPUT_CHARS = 8000
+TRUNCATE_THRESHOLD = 3000
 
 # Global list to store captured plots
 _captured_plots = []
@@ -189,6 +200,186 @@ def safe_reindex(df, *args, dedup_columns: bool = True, dedup_index: bool = True
     return working.reindex(*args, **kwargs)
 
 
+def _truncate_text(text: object, max_chars: int = _DEFAULT_MAX_CHARS) -> str:
+    """Convert an object to text and truncate long output for compact summaries."""
+    rendered = str(text)
+    if len(rendered) <= max_chars:
+        return rendered
+    omitted = len(rendered) - max_chars
+    return f"{rendered[:max_chars]} ... [truncated {omitted} chars]"
+
+
+def summarize_df(df, *, head_rows: int = _DEFAULT_DF_HEAD_ROWS, max_chars: int = _DEFAULT_MAX_CHARS) -> str:
+    """Return a compact summary string for DataFrames."""
+    if df is None:
+        return "DataFrame summary: <None>"
+
+    try:
+        shape = getattr(df, "shape", None)
+        columns = list(getattr(df, "columns", []))
+        col_preview = columns[:50]
+        lines = [
+            f"DataFrame summary: shape={shape}",
+            f"columns({len(columns)}): {col_preview}",
+        ]
+        if len(columns) > len(col_preview):
+            lines.append(f"... {len(columns) - len(col_preview)} more columns omitted")
+
+        head_obj = df.head(head_rows) if hasattr(df, "head") else df
+        lines.append(f"head({head_rows}):")
+        lines.append(_truncate_text(head_obj, max_chars=max_chars))
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"DataFrame summary unavailable: {exc}"
+
+
+def summarize_dict(d, *, top_n: int = _DEFAULT_DICT_TOP_N, max_chars: int = _DEFAULT_MAX_CHARS) -> str:
+    """Return a compact key/value summary string for dictionaries."""
+    if d is None:
+        return "dict summary: <None>"
+    if not isinstance(d, dict):
+        return _truncate_text(d, max_chars=max_chars)
+
+    items = list(d.items())
+    lines = [f"dict summary: total_keys={len(items)}, showing_top={min(top_n, len(items))}"]
+    for key, value in items[:top_n]:
+        key_text = _truncate_text(key, max_chars=120)
+        value_text = _truncate_text(repr(value), max_chars=max_chars)
+        lines.append(f"- {key_text}: {value_text}")
+
+    if len(items) > top_n:
+        lines.append(f"... {len(items) - top_n} more keys omitted")
+    return "\n".join(lines)
+
+
+def _summarize_sequence(seq, *, top_n: int = _DEFAULT_LIST_TOP_N, max_chars: int = _DEFAULT_MAX_CHARS) -> str:
+    """Return a compact summary for list/tuple/set values."""
+    seq_list = list(seq)
+    lines = [f"{type(seq).__name__} summary: size={len(seq_list)}, showing_top={min(top_n, len(seq_list))}"]
+    for idx, value in enumerate(seq_list[:top_n]):
+        lines.append(f"- [{idx}] {_truncate_text(repr(value), max_chars=max_chars)}")
+    if len(seq_list) > top_n:
+        lines.append(f"... {len(seq_list) - top_n} more items omitted")
+    return "\n".join(lines)
+
+
+def preview(
+    obj,
+    *,
+    df_head: int = _DEFAULT_DF_HEAD_ROWS,
+    dict_top_n: int = _DEFAULT_DICT_TOP_N,
+    list_top_n: int = _DEFAULT_LIST_TOP_N,
+    max_chars: int = _DEFAULT_MAX_CHARS,
+) -> str:
+    """Return a compact preview string for common large objects."""
+    if obj is None:
+        return "<None>"
+
+    # DataFrame/Series-like: prioritize tabular summary first.
+    if hasattr(obj, "columns") and hasattr(obj, "shape") and hasattr(obj, "head"):
+        return summarize_df(obj, head_rows=df_head, max_chars=max_chars)
+
+    if isinstance(obj, dict):
+        return summarize_dict(obj, top_n=dict_top_n, max_chars=max_chars)
+
+    if isinstance(obj, (list, tuple, set)):
+        return _summarize_sequence(obj, top_n=list_top_n, max_chars=max_chars)
+
+    return _truncate_text(obj, max_chars=max_chars)
+
+
+def _line_signature(line: str) -> str:
+    """Build a loose structural signature for a line by masking values."""
+    masked = re.sub(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", "D", line)
+    masked = re.sub(r"\b[A-Za-z_][\w\-]*\b", "W", masked)
+    masked = re.sub(r"\s+", " ", masked).strip()
+    return masked
+
+
+def _format_group(group: list[tuple[str, str]], head: int, tail: int) -> str:
+    """Format a run of lines that share the same signature with optional compression."""
+    lines = [item[0] for item in group]
+    if len(lines) <= head + tail + 1:
+        return "\n".join(lines)
+
+    omitted = len(lines) - head - tail
+    result = lines[:head]
+    result.append(f"  ... ({omitted} more rows with same structure)")
+    result.extend(lines[-tail:])
+    return "\n".join(result)
+
+
+def _compress_repeated_lines(lines: list[str], head: int = 5, tail: int = 2) -> str:
+    """Compress consecutive lines that share a structural signature."""
+    if len(lines) <= head + tail + 3:
+        return "\n".join(lines)
+
+    chunks: list[str] = []
+    current_group: list[tuple[str, str]] = []
+
+    for line in lines:
+        signature = _line_signature(line)
+        if current_group and signature == current_group[0][1]:
+            current_group.append((line, signature))
+            continue
+
+        if current_group:
+            chunks.append(_format_group(current_group, head=head, tail=tail))
+        current_group = [(line, signature)]
+
+    if current_group:
+        chunks.append(_format_group(current_group, head=head, tail=tail))
+
+    return "\n".join(chunks)
+
+
+def _structural_summarize(text: str) -> str:
+    """Apply structure-aware regex-based summarization to very large text."""
+
+    # DataFrame-like reprs: keep header + shape footer, collapse the middle.
+    text = re.sub(
+        r"((?:.*\n){0,8})(?:.*\n){10,}(\[\d+\s+rows\s+x\s+\d+\s+columns\])",
+        lambda m: f"{m.group(1)}  ... (omitted)\n{m.group(2)}",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    def _shorten_container(match: re.Match[str]) -> str:
+        content = match.group(0)
+        if len(content) < 500:
+            return content
+        return f"{content[:300]} ... ({len(content)} chars total)"
+
+    text = re.sub(r"\{[^{}]{500,}\}", _shorten_container, text, flags=re.DOTALL)
+    text = re.sub(r"\[[^\[\]]{500,}\]", _shorten_container, text, flags=re.DOTALL)
+    return text
+
+
+def _postprocess_output(raw: str) -> str:
+    """Post-process executed stdout so the LLM can consume compact, high-signal context."""
+    if not raw:
+        return raw
+
+    if len(raw) <= TRUNCATE_THRESHOLD:
+        return raw
+
+    lines = raw.split("\n")
+    compressed = _compress_repeated_lines(lines)
+
+    if len(compressed) > MAX_OUTPUT_CHARS:
+        compressed = _structural_summarize(compressed)
+
+    if len(compressed) > MAX_OUTPUT_CHARS:
+        half = MAX_OUTPUT_CHARS // 2
+        compressed = (
+            compressed[:half]
+            + f"\n\n... [{len(raw)} chars total, truncated] ...\n\n"
+            + compressed[-half:]
+        )
+
+    return compressed
+
+
 def run_python_repl(command: str) -> str:
     """Executes the provided Python command in a persistent environment and returns the output.
     Variables defined in one execution will be available in subsequent executions.
@@ -219,7 +410,7 @@ def run_python_repl(command: str) -> str:
             output = f"Error: {str(e)}"
         finally:
             sys.stdout = old_stdout
-        return output
+        return _postprocess_output(output)
 
     command = command.strip("```").strip()
     return execute_in_repl(command)

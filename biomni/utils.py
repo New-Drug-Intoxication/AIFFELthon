@@ -193,6 +193,7 @@ def run_with_timeout(func, args=None, kwargs=None, timeout=600):
     import ctypes
     import queue
     import threading
+    import time
 
     result_queue = queue.Queue()
 
@@ -204,35 +205,57 @@ def run_with_timeout(func, args=None, kwargs=None, timeout=600):
         except Exception as e:
             result_queue.put(("error", str(e)))
 
+    def _attempt_terminate_thread(target_thread):
+        """Best-effort attempt to stop a worker thread."""
+        try:
+            thread_id = target_thread.ident
+            if thread_id:
+                # This is not guaranteed, but can stop Python-level execution.
+                res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), ctypes.py_object(SystemExit))
+                if res > 1:
+                    # Oops, we raised too many exceptions
+                    ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), None)
+        except Exception as exc:
+            print(f"Error trying to terminate thread: {exc}")
+
     # Start a separate thread
     thread = threading.Thread(target=thread_func, args=(func, args, kwargs, result_queue))
     thread.daemon = True  # Set as daemon so it will be killed when main thread exits
     thread.start()
 
-    # Wait for the specified timeout
-    thread.join(timeout)
+    poll_interval_seconds = 1.0
+    heartbeat_interval_seconds = 30.0
+    func_name = getattr(func, "__name__", "callable")
+    started_at = time.monotonic()
+    last_heartbeat_at = started_at
+
+    try:
+        # Poll in short intervals so Ctrl+C is responsive and progress is visible.
+        while thread.is_alive():
+            elapsed = time.monotonic() - started_at
+            remaining = timeout - elapsed
+            if remaining <= 0:
+                break
+            thread.join(min(poll_interval_seconds, remaining))
+
+            if thread.is_alive():
+                now = time.monotonic()
+                if now - last_heartbeat_at >= heartbeat_interval_seconds:
+                    print(f"RUNNING: {func_name} still running ({int(elapsed)}s/{int(timeout)}s)")
+                    last_heartbeat_at = now
+    except KeyboardInterrupt:
+        print("INTERRUPT: Execution interrupted by user. Attempting to stop running task...")
+        _attempt_terminate_thread(thread)
+        raise
 
     # Check if the thread is still running after timeout
     if thread.is_alive():
-        print(f"TIMEOUT: Code execution timed out after {timeout} seconds")
-
-        # Unfortunately, there's no clean way to force terminate a thread in Python
-        # The recommended approach is to use daemon threads and let them be killed when main thread exits
-        # Here, we'll try to raise an exception in the thread to make it stop
-        try:
-            # Get thread ID and try to terminate it
-            thread_id = thread.ident
-            if thread_id:
-                # This is a bit dangerous and not 100% reliable
-                # It attempts to raise a SystemExit exception in the thread
-                res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), ctypes.py_object(SystemExit))
-                if res > 1:
-                    # Oops, we raised too many exceptions
-                    ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), None)
-        except Exception as e:
-            print(f"Error trying to terminate thread: {e}")
-
-        return f"ERROR: Code execution timed out after {timeout} seconds. Please try with simpler inputs or break your task into smaller steps."
+        print(f"TIMEOUT: {func_name} execution timed out after {timeout} seconds")
+        _attempt_terminate_thread(thread)
+        return (
+            f"ERROR: {func_name} execution timed out after {timeout} seconds. "
+            "Please try with simpler inputs or break your task into smaller steps."
+        )
 
     # Get the result from the queue if available
     try:
@@ -835,11 +858,49 @@ def textify_api_dict(api_dict):
                     param_desc = param.get("description", "No description")
                     param_default = param.get("default", "None")
                     lines.append(f"    - {param_name} ({param_type}): {param_desc} [Default: {param_default}]")
+            
+            # Process spec_expansion
+            spec_expansion = method.get("spec_expansion")
+            if spec_expansion:
+                lines.append("  Spec Expansion:")
+                # Return Schema
+                return_schema = spec_expansion.get("return_schema")
+                if return_schema:
+                    lines.append(f"    Return Schema Type: {return_schema.get('type', 'N/A')}")
+                    lines.append(f"    Return Schema Description: {return_schema.get('description', 'No description')}")
+                # Tool Type
+                tool_type = spec_expansion.get("tool_type")
+                if tool_type:
+                    lines.append(f"    Tool Type Category: {tool_type.get('category', 'N/A')}")
+                    lines.append(f"    Tool Type Domain: {tool_type.get('domain', 'N/A')}")
+                # Failure Pattern
+                failure_pattern = spec_expansion.get("failure_pattern")
+                if failure_pattern:
+                    important_failures = failure_pattern.get("important", [])
+                    if important_failures:
+                        lines.append("    Failure Pattern (Important):")
+                        for fail in important_failures:
+                            lines.append(f"      - Condition: {fail.get('condition', 'N/A')}")
+                            lines.append(f"        Source: {fail.get('source', 'N/A')}")
+                            lines.append(f"        Resolution: {fail.get('resolution', 'N/A')}")
+                    do_not_failures = failure_pattern.get("do_not", [])
+                    if do_not_failures:
+                        lines.append("    Failure Pattern (Do Not):")
+                        for fail in do_not_failures:
+                            lines.append(f"      - Condition: {fail.get('condition', 'N/A')}")
+                            lines.append(f"        Source: {fail.get('source', 'N/A')}")
+                            lines.append(f"        Resolution: {fail.get('resolution', 'N/A')}")
+                # Test Example
+                test_example = spec_expansion.get("test_example")
+                if test_example:
+                    lines.append(f"    Test Example: {test_example}")
 
             lines.append("")  # Empty line between methods
         lines.append("")  # Extra empty line after each category
 
     return "\n".join(lines)
+
+
 
 
 def read_module2api():

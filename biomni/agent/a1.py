@@ -1195,6 +1195,9 @@ CODE EXECUTION GUARDRAILS:
 - Every <execute> block must include required import statements for any library aliases used.
 - Before accessing DataFrame columns, inspect the table first with print(df.columns.tolist()) and print(df.head(3)).
 - Work incrementally: verify key variables (e.g., print(type(df), df.shape)) before reusing them in later steps.
+- Avoid large per-item external API loops (e.g., one API call for every candidate variant/gene).
+- For GWAS variant prioritization, prefer loading local data lake files (e.g., gwas_catalog.pkl) once and ranking candidates locally.
+- If external API access is needed, use a small number of focused calls and summarize intermediate results.
 """
 
         # Add self-critic instructions if needed
@@ -1565,7 +1568,11 @@ Each library is listed with its description to help you understand its functiona
 
                 if len(result) > 10000:
                     result = (
-                        "The output is too long to be added to context. Here are the first 10K characters...\n"
+                        "The output is too long to be added to context and was truncated to the first 10K characters.\n"
+                        "For large objects, print compact summaries in the next step, for example:\n"
+                        "- print(preview(df))\n"
+                        "- print(summarize_df(df))\n"
+                        "- print(preview(result_dict))\n\n"
                         + result[:10000]
                     )
 

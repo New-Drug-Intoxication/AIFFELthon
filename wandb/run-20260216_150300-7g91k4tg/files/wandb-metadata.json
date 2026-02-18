@@ -1,0 +1,49 @@
+{
+  "os": "Linux-6.8.0-100-generic-x86_64-with-glibc2.39",
+  "python": "CPython 3.11.14",
+  "startedAt": "2026-02-16T06:03:00.558542Z",
+  "args": [
+    "--max-instances",
+    "1",
+    "--tasks",
+    "gwas_variant_prioritization",
+    "lab_bench_dbqa",
+    "patient_gene_detection",
+    "rare_disease_diagnosis"
+  ],
+  "program": "/home/aiffel07/wonjin/Biomni/biomni/eval/run_eval.py",
+  "codePath": "biomni/eval/run_eval.py",
+  "codePathLocal": "biomni/eval/run_eval.py",
+  "git": {
+    "remote": "https://github.com/snap-stanford/Biomni.git",
+    "commit": "5116b9bc7019f70306bc7f317a73545294e653e5"
+  },
+  "email": "cwj6705@dankook.ac.kr",
+  "root": "/home/aiffel07/wonjin/Biomni",
+  "host": "aiffel07-GE75-Raider-10SF",
+  "executable": "/home/aiffel07/anaconda3/envs/biomni_e1/bin/python",
+  "cpu_count": 8,
+  "cpu_count_logical": 16,
+  "gpu": "NVIDIA GeForce RTX 2070",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "502392610816",
+      "used": "276409352192"
+    }
+  },
+  "memory": {
+    "total": "16571457536"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 2070",
+      "memoryTotal": "8589934592",
+      "cudaCores": 2304,
+      "architecture": "Turing",
+      "uuid": "GPU-982ae532-ddc6-5f0b-37db-4d8a2e608be4"
+    }
+  ],
+  "cudaVersion": "12.8",
+  "writerId": "ciaaac449ias835blh5mmqoir1obcuin"
+}
