@@ -1,0 +1,14 @@
+{
+  "meta": {
+    "snapshot_id": "plan_demo_rev_1",
+    "created_at": "2026-02-20T00:01:34.865167+00:00",
+    "index_file": "resources/index/master_index.json",
+    "index_sha256": "428dbbbccb2e9aa772355a1177242cc915cf027d125f070ed6305e7d9ac2e41e"
+  },
+  "selected_ids": {
+    "tools": [],
+    "data_lake": [],
+    "libraries": [],
+    "know_how": []
+  }
+}

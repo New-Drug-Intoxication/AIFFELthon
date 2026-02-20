@@ -1,0 +1,131 @@
+{
+  "Biochemistry": {
+    "description": "단백질/핵산의 고차 구조 분석 및 효소 반응의 동역학적/열역학적 특성을 분자 수준에서 정량화하는 전문가.",
+    "functions": [
+      "분광 분석: 원형 이색성(CD) 데이터를 활용한 단백질 2차 구조 비율 산출 및 열 안정성(Tm) 추정.",
+      "RNA 구조: dot-bracket 표기법 기반 RNA 2차 구조 특징(Stem, Loop, Stem-loop) 추출 및 앙상블 자유 에너지(ΔG) 계산.",
+      "반응 속도론: Michaelis-Menten 방정식을 이용한 효소/프로테아제 속도 파라미터(Vmax, Km, kcat, 촉매 효율) 비선형 회귀 분석.",
+      "결합 열역학: ITC(등온 적정 열량계) 데이터를 이용한 One-site binding 모델 피팅 및 결합 친화도(Kd), 엔탈피(ΔH), 엔트로피(ΔS) 산출.",
+      "보존 분석: MUSCLE 알고리즘 기반 다중 서열 정렬(MSA) 및 Neighbor-joining 법을 이용한 단백질 보존 영역 및 계통 분석."
+    ]
+  },
+  "Bioengineering": {
+    "description": "생물학적 공정의 공학적 설계, 화학종의 정밀 분석 및 시스템 수준의 대사/신호 네트워크 시뮬레이션 전문가.",
+    "functions": [
+      "공정 최적화: 반응 표면 분석법(RSM) 및 유전 알고리즘(GA)을 이용한 혐기성 소화 공정(메탄 수율) 최적화 및 감도 분석.",
+      "화학종 분석: HPLC-ICP-MS 원시 데이터 기반 비소(As) 등 화학종별 잔류 시간 매칭 및 검량선을 통한 정량 분석.",
+      "시스템 모델링: SBML(Systems Biology Markup Language) 표준 모델 생성, 반응(Reaction)/종(Species)/운동학(Kinetic law) 파라미터 정의.",
+      "대사 분석: COBRA 라이브러리 기반 플럭스 균형 분석(FBA) 및 유전자 섭동(Perturbation)에 따른 대사 네트워크 반응 시뮬레이션.",
+      "자동화: 액체 핸들러 및 실험 로봇 제어를 위한 자동화 프로토콜 및 워크플로우 설계."
+    ]
+  },
+  "Biophysics": {
+    "description": "물리적 측정 데이터 및 타임랩스 영상을 분석하여 생체 시스템의 구조적 동역학 및 힘의 역학을 연구하는 전문가.",
+    "functions": [
+      "구조 무질서도: IUPred2A 알고리즘을 활용한 단백질 내 본질적 무질서 영역(IDR) 및 결합 모티프(ANCHOR) 예측.",
+      "이미지 물리량: Lucas-Kanade 광학 흐름(Optical Flow) 알고리즘 기반 조직의 변형(Strain), 발산(Divergence), 회전(Curl) 역학 정량화.",
+      "세포 골격: Canny edge detection 및 Hough 변환을 이용한 세포골격(Cytoskeleton) 섬유의 배향성(Orientation) 및 정렬도(Order parameter) 분석.",
+      "신경 디코딩: PCA(주성분 분석) 및 Kalman 필터를 이용한 신경 스파이킹 데이터로부터 행동 변수 디코딩 및 궤적 모델링."
+    ]
+  },
+  "Cell Biology": {
+    "description": "세포의 거시적 행동(이동, 증식, 사멸) 및 세포 내 소기관의 상태를 이미지와 단일 세포 데이터로 추적하는 전문가.",
+    "functions": [
+      "세포 추적: trackpy 라이브러리 기반 타임랩스 영상 내 세포 궤적 추적 및 이동 메트릭(Net displacement, 속도, 방향성 비율) 계산.",
+      "주기 분석: Calcofluor white 염색 이미지 세그멘테이션을 통한 세포 주기 단계(G1, S, G2/M) 자동 분류 및 비율 정량.",
+      "운동성 패턴: K-means 클러스터링을 이용한 세포의 평균 제곱 변위(MSD) 기반 운동성 아형(Motility pattern) 분류.",
+      "세포 분리: FACS(유세포 분리) 데이터 로딩(FlowKit) 및 특정 형광 파라미터 기반 Gating 전략 수립을 통한 세포 농축 시뮬레이션.",
+      "표현형 분석: FlowCytometryTools 기반 다색 유세포 분석 데이터 처리 및 면역 표현형(Immunophenotyping) 주석.",
+      "소기관 정량: 미토콘드리아 골격화(Skeletonization)를 통한 네트워크 연결성(Connectivity) 및 막 전위(TMRE)의 공간적 불균일성 분석."
+    ]
+  },
+  "Common": {
+    "description": "범용 생물학 데이터베이스 검색, 문헌 정보 추출 및 에이전트 간 공통 코드 실행 인프라 지원.",
+    "functions": [
+      "DB 쿼리: UniProt(단백질), PDB/AlphaFold(구조), KEGG(대사), STRING(상호작용), ClinVar/GEO(변이/발현), JASPAR(모티프) API 연동 데이터 추출.",
+      "문헌 검색: PubMed, arXiv, Google Scholar 기반 논문 검색, DOI 기반 보충 자료(Supplementary info) 자동 수집 및 요약.",
+      "컨텐츠 파싱: 웹 페이지(BeautifulSoup) 및 PDF(PyPDF2) 본문 추출, Claude 기반 고급 웹 검색 에이전트 실행.",
+      "실행 엔진: Python REPL 환경, Bash 쉘 스크립트 실행, R 환경 연동을 통한 분석 코드의 동적 수행."
+    ]
+  },
+  "Genetics": {
+    "description": "유전 변이의 탐지, 기능적 영향 예측 및 집단 수준의 유전적 구조를 분석하는 전문가.",
+    "functions": [
+      "변이 분석: VCF(Variant Call Format) 파일 파싱 및 SNP/Indel 변이 필터링(Quality score, Depth 기준)과 기능적 영향(미스센스, 넌센스, 스플라이싱) 주석.",
+      "연관 분석: PLINK 기반 GWAS(Genome-Wide Association Study) 수행 및 Manhattan plot 시각화, 유의 SNP 추출.",
+      "집단 구조: PCA(주성분 분석) 및 ADMIXTURE 분석을 통한 집단 간 유전적 구조 및 조상 비율 추정.",
+      "유전 모델링: Hardy-Weinberg 평형 검정 및 카이제곱 검정을 통한 대립유전자 빈도 분석.",
+      "가계 분석: Pedigree 데이터 기반 멘델 유전 패턴(우성/열성/반성 유전) 시뮬레이션 및 LOD score 계산."
+    ]
+  },
+  "Genomics": {
+    "description": "대규모 유전체 데이터의 조립, 정렬, 발현 정량 및 기능적 해석을 수행하는 전문가.",
+    "functions": [
+      "서열 정렬: BWA/STAR 알고리즘을 이용한 차세대 염기서열(NGS) 데이터의 reference genome 정렬 및 BAM 파일 생성.",
+      "전사체 분석: RNA-seq 데이터 정량화(featureCounts) 및 DESeq2 기반 차등 발현 유전자(DEG) 분석.",
+      "유전체 조립: De novo assembly(SPAdes) 수행 및 N50, contig 길이 통계 산출.",
+      "피크 분석: ChIP-seq 데이터에서 MACS2를 이용한 피크 호출 및 전사인자 결합 부위 주석.",
+      "기능 해석: GO(Gene Ontology) 및 KEGG pathway enrichment 분석을 통한 유전자 집합의 생물학적 의미 도출."
+    ]
+  },
+  "Microbiology": {
+    "description": "미생물의 동정, 군집 구조 분석 및 항생제 내성 메커니즘을 연구하는 전문가.",
+    "functions": [
+      "균 동정: 16S rRNA 서열 기반 BLAST 검색 및 계통수(Phylogenetic tree) 작성.",
+      "군집 분석: QIIME2 기반 알파/베타 다양성 분석 및 Bray-Curtis 거리 계산.",
+      "메타게놈: Shotgun metagenomics 데이터 품질 제어(QC) 및 Kraken2를 이용한 종 분류.",
+      "성장 곡선: OD600 데이터 기반 로지스틱 성장 모델 피팅 및 doubling time 계산.",
+      "항생제 내성: ResFinder 데이터베이스 기반 내성 유전자 탐지 및 MIC 값 해석."
+    ]
+  },
+  "Molecular Biology": {
+    "description": "분자 수준에서 유전자 발현 조절, 단백질 상호작용 및 클로닝 전략을 설계하는 전문가.",
+    "functions": [
+      "클로닝 설계: 제한효소 사이트 분석 및 Gibson assembly 프라이머 설계.",
+      "발현 분석: qPCR Ct 값 정규화(ΔΔCt 방법) 및 상대 발현량 계산.",
+      "단백질 상호작용: Co-immunoprecipitation(Co-IP) 데이터 해석 및 상호작용 네트워크 구성.",
+      "프로모터 분석: 전사인자 결합 모티프 스캐닝(JASPAR) 및 프로모터 영역 주석.",
+      "돌연변이 제작: Site-directed mutagenesis 프라이머 설계 및 아미노산 치환 영향 예측."
+    ]
+  },
+  "Pathology": {
+    "description": "질병 관련 조직학적, 분자적 변화를 분석하고 임상 데이터와 통합 해석하는 전문가.",
+    "functions": [
+      "조직 이미지 분석: H&E 염색 슬라이드에서 세포 밀도 및 핵 이형성 정량화.",
+      "종양 분류: CNN 기반 디지털 병리 이미지에서 양성/악성 종양 분류.",
+      "바이오마커 분석: 면역조직화학(IHC) 염색 강도 스코어링 및 발현 패턴 비교.",
+      "생존 분석: Kaplan-Meier 곡선 및 Cox 비례위험 모형을 통한 예후 인자 평가.",
+      "병리 리포트 요약: 임상 병리 보고서 텍스트 마이닝 및 주요 진단 정보 추출."
+    ]
+  },
+  "Pharmacology": {
+    "description": "약물의 작용 기전, 약동학/약력학 특성 및 독성 프로파일을 분석하는 전문가.",
+    "functions": [
+      "약동학 분석: 비구획 분석(NCA)을 통한 Cmax, Tmax, AUC 산출.",
+      "용량-반응 곡선: Hill 방정식 기반 EC50/IC50 추정 및 비선형 회귀 피팅.",
+      "약물 상호작용: Bliss independence 및 Loewe additivity 모델을 이용한 시너지 분석.",
+      "독성 예측: QSAR 모델링 및 ADMET 특성 예측.",
+      "임상 데이터 분석: 임상 시험 데이터에서 이상반응 발생률 및 통계적 유의성 평가."
+    ]
+  },
+  "Physiology": {
+    "description": "개체 수준에서 생리적 신호를 측정·모델링하고 항상성 유지 메커니즘을 해석하는 전문가.",
+    "functions": [
+      "심혈관 분석: ECG 신호 전처리 및 HRV(Heart Rate Variability) 지표 계산.",
+      "호흡 생리: 폐활량(spirometry) 데이터 해석 및 FEV1/FVC 비율 분석.",
+      "대사 측정: 간접 열량측정법을 통한 기초대사율(BMR) 추정.",
+      "신경 생리: EEG 파형 분석 및 주파수 대역별 파워 스펙트럼 계산.",
+      "항상성 모델링: 음성 되먹임(negative feedback) 기반 생리 조절 시스템 수학적 모델링."
+    ]
+  },
+  "Synthetic Biology": {
+    "description": "유전자 회로 설계 및 생물학적 시스템의 인공적 재구성을 수행하는 전문가.",
+    "functions": [
+      "유전자 회로 설계: 논리 게이트 기반 합성 유전자 네트워크 설계 및 ODE 모델 시뮬레이션.",
+      "CRISPR 설계: gRNA 서열 설계 및 off-target 예측 분석.",
+      "프로모터 튜닝: RBS 계산기 기반 번역 개시율(TIR) 최적화.",
+      "모듈 조립: Golden Gate assembly 전략 설계 및 벡터 맵 생성.",
+      "바이오센서 개발: 리포터 유전자 기반 농도-신호 변환 특성 모델링."
+    ]
+  }
+}

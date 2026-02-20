@@ -1,0 +1,13 @@
+autosite
+FastTree
+fcsparser
+gcta64
+Homer
+iqtree2
+macs2
+muscle
+plannotate
+plink
+plink2
+trimmomatic
+vina
