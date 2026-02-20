@@ -3,6 +3,9 @@ import io
 import re
 import sys
 from io import StringIO
+import os
+import functools
+from typing import Any, Callable
 
 # Create a persistent namespace that will be shared across all executions
 _persistent_namespace = {}
@@ -31,6 +34,65 @@ TRUNCATE_THRESHOLD = 3000
 
 # Global list to store captured plots
 _captured_plots = []
+
+
+def _get_default_request_timeout() -> tuple[float, float]:
+    """Read default request timeout tuple from environment variables."""
+    def _coerce(name: str, fallback: float) -> float:
+        raw_value = os.getenv(name, str(fallback))
+        try:
+            return float(raw_value)
+        except ValueError:
+            return fallback
+
+    connect_timeout = _coerce("BIOMNI_HTTP_CONNECT_TIMEOUT", 10.0)
+    read_timeout = _coerce("BIOMNI_HTTP_READ_TIMEOUT", 90.0)
+    return (connect_timeout, read_timeout)
+
+
+def _install_requests_default_timeout() -> None:
+    """Patch requests.get/post with default timeout when timeout is omitted.
+
+    This prevents indefinite blocking in tool functions that perform network calls
+    but do not pass explicit timeout arguments.
+    """
+    import requests
+
+    if getattr(requests, "_biomni_default_timeout_patched", False):
+        return
+
+    default_timeout = _get_default_request_timeout()
+
+    def _normalize_timeout(timeout: Any) -> tuple[float, float] | float:
+        if timeout is None:
+            return default_timeout
+        return timeout
+
+    def with_default_timeout(request_fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(request_fn)
+        def wrapper(*args, **kwargs):
+            kwargs["timeout"] = _normalize_timeout(kwargs.get("timeout"))
+            return request_fn(*args, **kwargs)
+
+        return wrapper
+
+    requests.get = with_default_timeout(requests.get)  # type: ignore[assignment]
+    requests.post = with_default_timeout(requests.post)  # type: ignore[assignment]
+    requests.request = with_default_timeout(requests.request)  # type: ignore[assignment]
+
+    # Cover session-level requests that skip the top-level convenience methods.
+    original_session_request = requests.Session.request
+
+    @functools.wraps(original_session_request)
+    def session_request_with_timeout(self, *args, **kwargs):
+        kwargs["timeout"] = _normalize_timeout(kwargs.get("timeout"))
+        return original_session_request(self, *args, **kwargs)
+
+    requests.Session.request = session_request_with_timeout  # type: ignore[assignment]
+    requests._biomni_default_timeout_patched = True
+
+
+_install_requests_default_timeout()
 
 
 def _bootstrap_default_namespace() -> None:

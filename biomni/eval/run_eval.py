@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import sqlite3
 import os
 import sys
 from typing import Callable
@@ -13,6 +14,43 @@ from biomni.eval.benchmark import BixBenchAdapter, BiomniEval1Adapter, LabBenchA
 from biomni.eval.logger import MultiLogger, SQLiteLogger, WandBLogger
 from biomni.eval.pipeline import EvaluationPipeline
 
+
+def _load_completed_instance_ids(db_path: str, benchmark_id: str, tasks: list[str] | None, experiment_id: int | None = None) -> dict[str, set[str]]:
+    """Load already completed instance IDs from a previous SQLite experiment.
+
+    Returns a mapping of task_name -> set(instance_id).
+    """
+    if not os.path.exists(db_path):
+        return {}
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+
+        if experiment_id is None:
+            query = "SELECT id FROM experiments WHERE benchmark_id = ? ORDER BY id DESC LIMIT 1"
+            cursor.execute(query, (benchmark_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return {}
+            experiment_id = int(row[0])
+
+        if tasks:
+            placeholders = ",".join("?" for _ in tasks)
+            cursor.execute(
+                f"SELECT task_name, instance_id FROM results WHERE experiment_id = ? AND task_name IN ({placeholders})",
+                [experiment_id] + tasks,
+            )
+        else:
+            cursor.execute(
+                "SELECT task_name, instance_id FROM results WHERE experiment_id = ?",
+                (experiment_id,),
+            )
+
+        completed: dict[str, set[str]] = {}
+        for task_name, instance_id in cursor.fetchall():
+            completed.setdefault(task_name, set()).add(str(instance_id))
+
+        return completed
 
 def get_benchmark(benchmark_id: str):
     if benchmark_id == "biomni_eval1":
@@ -35,11 +73,11 @@ def _normalize_path_for_a1(path: str) -> str:
     return path
 
 
-def make_agent_factory(llm: str, path: str) -> Callable[[], A1]:
+def make_agent_factory(llm: str, path: str, timeout_seconds: int | None = None) -> Callable[[], A1]:
     a1_path = _normalize_path_for_a1(path)
 
     def factory():
-        return A1(path=a1_path, llm=llm)
+        return A1(path=a1_path, llm=llm, timeout_seconds=timeout_seconds)
 
     return factory
 
@@ -63,6 +101,12 @@ def main():
     parser.add_argument("--no-wandb", action="store_true", help="Disable WandB logging")
     parser.add_argument("--db-path", type=str, default="biomni_eval.db", help="SQLite database path")
     parser.add_argument("--max-instances", type=int, default=None, help="Max instances per task (for testing)")
+    parser.add_argument(
+        "--agent-timeout-seconds",
+        type=int,
+        default=120,
+        help="Timeout for whole A1 execution per instance in seconds (default: 120, recommended 120~180).",
+    )
 
     # A1 Configuration Arguments
     parser.add_argument("--self-critic", action="store_true", help="Enable A1 self-critic mode")
@@ -72,6 +116,17 @@ def main():
         default=0,
         help="Number of extra self-critic rounds for A1 (default: 0)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip instances already logged in a prior sqlite experiment",
+    )
+    parser.add_argument(
+        "--resume-experiment-id",
+        type=int,
+        default=None,
+        help="Experiment id to resume from in the sqlite DB (default: latest for selected benchmark)",
+    )
 
     args = parser.parse_args()
 
@@ -80,6 +135,8 @@ def main():
         default_config.llm = args.llm
     if args.path:
         default_config.path = args.path
+    if args.agent_timeout_seconds is not None:
+        default_config.timeout_seconds = args.agent_timeout_seconds
 
     loggers = []
 
@@ -101,17 +158,35 @@ def main():
 
     combined_logger = MultiLogger(loggers)
 
+    completed_instances: dict[str, set[str]] = {}
+    if args.resume:
+        completed_instances = _load_completed_instance_ids(
+            db_path=args.db_path,
+            benchmark_id=args.benchmark,
+            tasks=args.tasks,
+            experiment_id=args.resume_experiment_id,
+        )
+        if completed_instances:
+            print(f"Resuming from DB: skipping {sum(len(v) for v in completed_instances.values())} instances")
+        else:
+            print("Resume requested but no completed rows found; running full remaining set.")
+
     try:
         benchmark = get_benchmark(args.benchmark)
     except Exception as e:
         print(f"Error loading benchmark: {e}")
         return
 
-    agent_factory = make_agent_factory(llm=default_config.llm, path=default_config.path)
+    agent_factory = make_agent_factory(
+        llm=default_config.llm,
+        path=default_config.path,
+        timeout_seconds=default_config.timeout_seconds,
+    )
 
     agent_config = {
         "self_critic": args.self_critic,
         "test_time_scale_round": args.test_time_scale_round,
+        "agent_timeout_seconds": args.agent_timeout_seconds,
     }
 
     pipeline = EvaluationPipeline(
@@ -120,6 +195,7 @@ def main():
         logger=combined_logger,
         max_instances=args.max_instances,
         agent_config=agent_config,
+        completed_instance_ids=completed_instances,
     )
 
     pipeline.run(tasks=args.tasks, split=args.split)

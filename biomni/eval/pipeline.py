@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 from biomni.eval.benchmark import Benchmark
 from biomni.eval.logger import BaseLogger
+from biomni.utils import run_with_timeout
 from biomni.tool.support_tools import reset_python_repl_namespace
 
 
@@ -225,6 +226,7 @@ class EvaluationPipeline:
         logger: BaseLogger,
         max_instances: Optional[int] = None,
         agent_config: Optional[Dict[str, Any]] = None,
+        completed_instance_ids: Optional[Dict[str, set[str]]] = None,
     ):
         """
         Args:
@@ -239,6 +241,20 @@ class EvaluationPipeline:
         self.logger = logger
         self.max_instances = max_instances
         self.agent_config = agent_config or {}
+        self.completed_instance_ids = completed_instance_ids or {}
+        self.instance_timeout_seconds = self.agent_config.pop("agent_timeout_seconds", None)
+
+    def _get_instances_to_evaluate(self, task_name: str, split: str) -> list[Dict[str, Any]]:
+        instances = self.benchmark.get_instances(task_name, split)
+
+        completed = self.completed_instance_ids.get(task_name, set())
+        if completed:
+            instances = [instance for instance in instances if str(instance["instance_id"]) not in completed]
+
+        if self.max_instances is not None:
+            instances = instances[: self.max_instances]
+
+        return instances
 
     def run(self, tasks: Optional[List[str]] = None, split: str = "val"):
         """
@@ -269,11 +285,8 @@ class EvaluationPipeline:
 
         total_instances = 0
         for task_name in tasks:
-            task_instances = len(self.benchmark.get_instances(task_name, split))
-            if self.max_instances is not None:
-                total_instances += min(task_instances, self.max_instances)
-            else:
-                total_instances += task_instances
+            instances = self._get_instances_to_evaluate(task_name, split)
+            total_instances += len(instances)
 
         print(f"Starting evaluation on {len(tasks)} tasks: {tasks}")
         print(f"Total instances to evaluate: {total_instances}")
@@ -291,10 +304,17 @@ class EvaluationPipeline:
 
     def _evaluate_task(self, task_name: str, split: str, pbar: tqdm) -> dict[str, Any] | None:
         pbar.write(f"\n=== Evaluating Task: {task_name} ===")
-        instances = self.benchmark.get_instances(task_name, split)
+        instances = self._get_instances_to_evaluate(task_name, split)
 
-        if self.max_instances is not None:
-            instances = instances[: self.max_instances]
+        if not instances:
+            pbar.write(f"Task {task_name} already completed or empty. Skipping.")
+            return {
+                "task_name": task_name,
+                "instances": 0,
+                "accuracy": 0.0,
+                "avg_score": 0.0,
+                "successes": 0,
+            }
 
         success_count = 0
         total_score = 0.0
@@ -372,26 +392,100 @@ class EvaluationPipeline:
         trajectory: list[str] = []
         error = None
         score = 0.0
+        instance_timed_out = False
+        timeout_meta: dict[str, Any] | None = None
+
+        def _is_execution_error_output(value: Any) -> bool:
+            if not isinstance(value, str):
+                return False
+            return value.startswith(("TIMEOUT:", "ERROR:")) or value.startswith("Error in execution:")
+
+        def _extract_timeout_metadata(raw: str) -> tuple[float | None, str | None]:
+            if not isinstance(raw, str):
+                return None, None
+            match = re.search(r"elapsed=([0-9]+(?:\.[0-9]+)?)s", raw)
+            if match:
+                try:
+                    return float(match.group(1)), "run_with_timeout"
+                except ValueError:
+                    pass
+            if "timed out" in raw.lower():
+                return None, "run_with_timeout"
+            return None, None
 
         try:
-            log, raw_response = agent.go(prompt)
-            trajectory = log
-            prediction = normalize_prediction_for_scoring(task_name=task_name, prompt=prompt, prediction=raw_response)
+            if self.instance_timeout_seconds is None:
+                log, raw_response = agent.go(prompt)
+            else:
+                run_result = run_with_timeout(agent.go, args=[prompt], timeout=self.instance_timeout_seconds)
 
-            try:
-                score = self.benchmark.evaluate_result(task_name, instance, prediction)
-            except Exception as eval_error:
-                preview = prediction[:240].replace("\n", "\\n")
-                print(f"Evaluation error for {task_name}/{instance['instance_id']}: {eval_error}")
-                print(
-                    "Debug:"
-                    f" raw_response_type={type(raw_response).__name__},"
-                    f" normalized_prediction_len={len(prediction)},"
-                    f" normalized_prediction_preview={preview}"
-                )
-                traceback.print_exc()
-                error = str(eval_error)
-                score = 0.0
+                if isinstance(run_result, tuple) and len(run_result) == 2:
+                    log, raw_response = run_result
+                elif _is_execution_error_output(run_result):
+                    instance_timed_out = True
+                    prediction = "ERROR"
+                    error = run_result
+                    timeout_elapsed, timeout_source = _extract_timeout_metadata(error)
+                    timeout_meta = {
+                        "source": timeout_source,
+                        "timeout_seconds": self.instance_timeout_seconds,
+                        "elapsed_seconds": timeout_elapsed,
+                    }
+                    raw_response = run_result
+                    trajectory = []
+                else:
+                    # Unexpected return value from timeout wrapper
+                    instance_timed_out = True
+                    prediction = "ERROR"
+                    error = f"Unexpected run_with_timeout result: {run_result!r}"
+                    raw_response = str(run_result)
+                    trajectory = []
+
+            if not instance_timed_out:
+                trajectory = log
+                if _is_execution_error_output(raw_response):
+                    instance_timed_out = True
+                    error = raw_response
+                    prediction = "ERROR"
+                else:
+                    prediction = normalize_prediction_for_scoring(
+                        task_name=task_name, prompt=prompt, prediction=raw_response
+                    )
+
+            if instance_timed_out and error:
+                if timeout_meta is None and isinstance(error, str) and "timed out" in error.lower():
+                    timeout_elapsed, timeout_source = _extract_timeout_metadata(error)
+                    timeout_meta = {
+                        "source": timeout_source,
+                        "timeout_seconds": self.instance_timeout_seconds,
+                        "elapsed_seconds": timeout_elapsed,
+                    }
+
+                if timeout_meta:
+                    print(
+                        f"[timeout] task={task_name} instance={instance['instance_id']} "
+                        f"source={timeout_meta.get('source', 'run_with_timeout')} "
+                        f"timeout={timeout_meta.get('timeout_seconds')} "
+                        f"elapsed={timeout_meta.get('elapsed_seconds')}s reason={error}"
+                    )
+                else:
+                    print(f"[timeout] Instance {instance['instance_id']} on task {task_name}: {error}")
+
+            if not instance_timed_out and prediction != "ERROR":
+                try:
+                    score = self.benchmark.evaluate_result(task_name, instance, prediction)
+                except Exception as eval_error:
+                    preview = prediction[:240].replace("\n", "\\n")
+                    print(f"Evaluation error for {task_name}/{instance['instance_id']}: {eval_error}")
+                    print(
+                        "Debug:"
+                        f" raw_response_type={type(raw_response).__name__},"
+                        f" normalized_prediction_len={len(prediction)},"
+                        f" normalized_prediction_preview={preview}"
+                    )
+                    traceback.print_exc()
+                    error = str(eval_error)
+                    score = 0.0
 
         except Exception as exc:
             error = str(exc)

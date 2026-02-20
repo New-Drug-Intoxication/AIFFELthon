@@ -218,6 +218,17 @@ def run_with_timeout(func, args=None, kwargs=None, timeout=600):
         except Exception as exc:
             print(f"Error trying to terminate thread: {exc}")
 
+    def _format_seconds(value: float) -> str:
+        return f"{value:.2f}"
+
+    def _get_thread_state(target_thread):
+        if not target_thread:
+            return "not-started"
+        return "alive" if target_thread.is_alive() else "finished"
+
+        # On CPython + POSIX only, best-effort asynchronous signal can complement this.
+        # We keep this as metadata-only today for safety and API stability.
+
     # Start a separate thread
     thread = threading.Thread(target=thread_func, args=(func, args, kwargs, result_queue))
     thread.daemon = True  # Set as daemon so it will be killed when main thread exits
@@ -241,7 +252,14 @@ def run_with_timeout(func, args=None, kwargs=None, timeout=600):
             if thread.is_alive():
                 now = time.monotonic()
                 if now - last_heartbeat_at >= heartbeat_interval_seconds:
-                    print(f"RUNNING: {func_name} still running ({int(elapsed)}s/{int(timeout)}s)")
+                    remaining = max(0.0, timeout - elapsed)
+                    print(
+                        "RUNNING: "
+                        f"{func_name} still running (elapsed={_format_seconds(elapsed)}s, "
+                        f"remaining={_format_seconds(remaining)}s, "
+                        f"thread={_get_thread_state(thread)}, "
+                        f"timeout={_format_seconds(timeout)}s)"
+                    )
                     last_heartbeat_at = now
     except KeyboardInterrupt:
         print("INTERRUPT: Execution interrupted by user. Attempting to stop running task...")
@@ -250,19 +268,34 @@ def run_with_timeout(func, args=None, kwargs=None, timeout=600):
 
     # Check if the thread is still running after timeout
     if thread.is_alive():
+        elapsed = time.monotonic() - started_at
         print(f"TIMEOUT: {func_name} execution timed out after {timeout} seconds")
         _attempt_terminate_thread(thread)
         return (
-            f"ERROR: {func_name} execution timed out after {timeout} seconds. "
+            f"ERROR: {func_name} execution timed out after {timeout} seconds "
+            f"(elapsed={_format_seconds(elapsed)}s, source=run_with_timeout, "
+            f"thread={_get_thread_state(thread)}). "
             "Please try with simpler inputs or break your task into smaller steps."
         )
 
     # Get the result from the queue if available
     try:
         status, result = result_queue.get(block=False)
-        return result if status == "success" else f"Error in execution: {result}"
+        elapsed = time.monotonic() - started_at
+        if status == "success":
+            return result
+        return (
+            f"Error in execution: {result} "
+            f"(elapsed={_format_seconds(elapsed)}s, func={func_name}, source=run_with_timeout, "
+            f"thread={_get_thread_state(thread)})"
+        )
     except queue.Empty:
-        return "Error: Execution completed but no result was returned"
+        elapsed = time.monotonic() - started_at
+        return (
+            "Error: Execution completed but no result was returned "
+            f"(elapsed={_format_seconds(elapsed)}s, func={func_name}, source=run_with_timeout, "
+            f"thread={_get_thread_state(thread)})"
+        )
 
 
 class api_schema(BaseModel):

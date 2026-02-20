@@ -4,7 +4,7 @@ import pickle
 import re
 import time
 from typing import Any
-from urllib.parse import unquote, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
 import requests
 from Bio.Blast import NCBIWWW, NCBIXML
@@ -14,9 +14,371 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from biomni.llm import get_llm
 from biomni.utils import parse_hpo_obo
 
-DEFAULT_HTTP_CONNECT_TIMEOUT = float(os.getenv("BIOMNI_HTTP_CONNECT_TIMEOUT", "10"))
-DEFAULT_HTTP_READ_TIMEOUT = float(os.getenv("BIOMNI_HTTP_READ_TIMEOUT", "90"))
+def _coerce_float_timeout(value: object, fallback: float) -> float:
+    """Safely parse an environment value into a float timeout."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+
+
+DEFAULT_HTTP_CONNECT_TIMEOUT = _coerce_float_timeout(os.getenv("BIOMNI_HTTP_CONNECT_TIMEOUT", "10"), 10.0)
+DEFAULT_HTTP_READ_TIMEOUT = _coerce_float_timeout(os.getenv("BIOMNI_HTTP_READ_TIMEOUT", "90"), 90.0)
 DEFAULT_HTTP_TIMEOUT = (DEFAULT_HTTP_CONNECT_TIMEOUT, DEFAULT_HTTP_READ_TIMEOUT)
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Coerce a value to bool with string fallbacks for env vars."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    return default
+
+
+def _is_tool_trace_enabled() -> bool:
+    """Whether to emit detailed tool call trace logs."""
+    return _coerce_bool(os.getenv("BIOMNI_TOOL_CALL_TRACE", "0"), default=False)
+
+
+def _shorten_for_log(value: Any, max_chars: int = 200) -> str:
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 40] + f"... ({len(text)} chars total)"
+
+
+def _tool_trace(message: str, **fields: Any) -> None:
+    if not _is_tool_trace_enabled():
+        return
+    payload = ", ".join(f"{key}={_shorten_for_log(value)}" for key, value in fields.items())
+    if payload:
+        print(f"[tool-trace] {message} | {payload}")
+    else:
+        print(f"[tool-trace] {message}")
+
+
+def _trace_ms(start_time: float) -> float:
+    return round((time.perf_counter() - start_time) * 1000.0, 2)
+
+_GWAS_ENDPOINT_PREFIXES = (
+    "studies",
+    "associations",
+    "singleNucleotidePolymorphisms",
+    "efoTraits",
+)
+_GWAS_ALLOWED_FULL_URL_PREFIXES = (
+    "https://www.ebi.ac.uk/gwas/rest/api/",
+    "https://www.ebi.ac.uk/gwas/rest/api",
+)
+
+
+def _get_gwas_timeout() -> tuple[float, float]:
+    """Get GWAS Catalog timeout tuple from environment variables.
+
+    BIOMNI_GWAS_CONNECT_TIMEOUT / BIOMNI_GWAS_READ_TIMEOUT override
+    the defaults used by _query_rest_api.
+    """
+    connect_timeout = os.getenv("BIOMNI_GWAS_CONNECT_TIMEOUT", str(DEFAULT_HTTP_CONNECT_TIMEOUT))
+    read_timeout = os.getenv("BIOMNI_GWAS_READ_TIMEOUT", str(DEFAULT_HTTP_READ_TIMEOUT))
+
+    try:
+        connect = float(connect_timeout)
+        read = float(read_timeout)
+        return (connect, read)
+    except ValueError:
+        return DEFAULT_HTTP_TIMEOUT
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    """Coerce int-like values to int with safe fallback."""
+    try:
+        int_value = int(value)
+        return int_value if int_value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_gwas_endpoint(endpoint: str) -> str:
+    """Normalize and validate a GWAS endpoint path."""
+    if not isinstance(endpoint, str):
+        return ""
+
+    candidate = endpoint.strip()
+    if not candidate:
+        return ""
+
+    if candidate.startswith("http://") or candidate.startswith("https://"):
+        if any(candidate.startswith(prefix) for prefix in _GWAS_ALLOWED_FULL_URL_PREFIXES):
+            candidate = candidate.split("/gwas/rest/api/", 1)[1]
+            return candidate.lstrip("/")
+        # If URL is not GWAS Catalog, treat as invalid.
+        return ""
+
+    return candidate.lstrip("/")
+
+
+def _extract_gwas_endpoint_and_params(endpoint: str) -> tuple[str, dict[str, Any]]:
+    """Split an endpoint into normalized path and params.
+
+    Supports:
+    - full URLs under the GWAS endpoint prefix
+    - path-like endpoints with query strings
+    """
+    if not isinstance(endpoint, str):
+        return "", {}
+
+    normalized = endpoint.strip()
+    if not normalized:
+        return "", {}
+
+    if normalized.startswith("http://") or normalized.startswith("https://"):
+        if not any(normalized.startswith(prefix) for prefix in _GWAS_ALLOWED_FULL_URL_PREFIXES):
+            return "", {}
+        parsed = urlparse(normalized)
+        try:
+            candidate_path = parsed.path.split("/gwas/rest/api/", 1)[1]
+        except ValueError:
+            candidate_path = parsed.path
+        path = candidate_path.lstrip("/")
+        raw_params = parse_qs(parsed.query or "", keep_blank_values=True)
+        params: dict[str, Any] = {}
+        for key, values in raw_params.items():
+            if not key:
+                continue
+            if len(values) == 0:
+                continue
+            if len(values) == 1:
+                params[key] = values[0]
+            else:
+                params[key] = values[0]
+        return path, params
+
+    if "?" not in normalized:
+        return normalized.lstrip("/"), {}
+
+    path, query = normalized.split("?", 1)
+    raw_params = parse_qs(query, keep_blank_values=True)
+    params: dict[str, Any] = {}
+    for key, values in raw_params.items():
+        if not key:
+            continue
+        if len(values) == 0:
+            continue
+        if len(values) == 1:
+            params[key] = values[0]
+        else:
+            params[key] = values[0]
+    return path.lstrip("/"), params
+
+
+def _extract_gwas_endpoint_root(endpoint: str) -> str:
+    """Return endpoint root segment for simple validation."""
+    if not endpoint:
+        return ""
+
+    no_query = endpoint.split("?", 1)[0]
+    return no_query.split("/")[0] if no_query else ""
+
+
+def _clamp_gwas_params(params: Any, max_results: int) -> dict[str, Any]:
+    """Clamp/normalize query params for GWAS requests."""
+    normalized = params.copy() if isinstance(params, dict) else {}
+    limit_results = _coerce_int(max_results, 3)
+    normalized["size"] = limit_results
+    # Normalize common aliases if present
+    for alias in ("limit", "rows", "pageSize"):
+        if alias in normalized:
+            normalized.pop(alias, None)
+    # Normalize projection-like options to safe values.
+    projection = normalized.get("projection")
+    if projection is not None:
+        projection_value = str(projection).strip().lower()
+        if projection_value not in {"full", "compact"}:
+            normalized.pop("projection", None)
+        else:
+            normalized["projection"] = projection_value
+
+    if "page" in normalized:
+        normalized["page"] = _coerce_int(normalized["page"], 0)
+    else:
+        normalized.setdefault("page", 0)
+    return normalized
+
+
+def _truncate_gwas_text(value: Any, max_chars: int) -> str:
+    rendered = str(value)
+    if len(rendered) <= max_chars:
+        return rendered
+    return rendered[: max_chars - 80] + f"... ({len(rendered)} chars total)"
+
+
+def _extract_gwas_summary_block(item: Any, max_chars: int = 120) -> dict[str, Any]:
+    """Extract a compact GWAS entry summary from one result item."""
+    if not isinstance(item, dict):
+        return {"raw": _truncate_gwas_text(item, max_chars)}
+
+    def _first_field(names: tuple[str, ...]):
+        for name in names:
+            if name in item and item[name] not in (None, ""):
+                candidate = item[name]
+                if isinstance(candidate, (str, int, float, bool)):
+                    return candidate
+                return _truncate_gwas_text(candidate, max_chars)
+        return None
+
+    trait = _first_field(("trait", "traitName", "diseaseTrait", "disease", "phenotype", "studyTrait"))
+    locus = _first_field(("locus", "locusShortForm", "locus_id"))
+    pvalue = _first_field(("pvalue", "pvalueMantissa", "pvalueDescription"))
+    if pvalue is None and "pvalueMantissa" in item and "pvalueExponent" in item:
+        try:
+            pvalue = f"{item['pvalueMantissa']}e{item['pvalueExponent']}"
+        except Exception:
+            pvalue = None
+
+    study = None
+    if "study" in item:
+        study = _first_field(("study",))
+        if isinstance(study, dict):
+            if "studyTag" in study:
+                study = study["studyTag"]
+            elif "_links" in study:
+                links = study.get("_links")
+                if isinstance(links, dict) and "self" in links and isinstance(links["self"], dict):
+                    study = links["self"].get("href", study)
+            elif "accessionId" in study:
+                study = study.get("accessionId")
+
+    snps = []
+    loci = item.get("loci")
+    if isinstance(loci, list):
+        for locus_item in loci:
+            if not isinstance(locus_item, dict):
+                continue
+            strongest = locus_item.get("strongestRiskAlleles")
+            if not isinstance(strongest, list):
+                continue
+            for allele in strongest:
+                if not isinstance(allele, dict):
+                    continue
+                snp_name = allele.get("riskAlleleName") or allele.get("risk_allele")
+                if isinstance(snp_name, str) and snp_name:
+                    snps.append(snp_name.split("-", 1)[0])
+            if len(snps) >= 3:
+                break
+
+    summary: dict[str, Any] = {}
+    if trait is not None:
+        summary["trait"] = trait
+    if locus is not None:
+        summary["locus"] = locus
+    if pvalue is not None:
+        summary["pvalue"] = pvalue
+    if snps:
+        summary["snp"] = snps[0] if len(snps) == 1 else snps
+    if study is not None:
+        summary["study"] = study
+    return summary
+
+
+def _summarize_gwas_result(raw_result: Any, *, max_items: int = 20, max_chars: int = 7000) -> dict[str, Any]:
+    """Create compact GWAS HAL payload summary while preserving core metadata."""
+    if not isinstance(raw_result, dict):
+        return {
+            "result_summary": {"error": "non_dict_result", "truncated": False},
+            "value": _truncate_gwas_text(raw_result, max_chars),
+        }
+
+    embedded = raw_result.get("_embedded", {})
+    links = raw_result.get("_links", {})
+    page = raw_result.get("page", {})
+
+    if not isinstance(embedded, dict) or not embedded:
+        return {
+            "result_summary": {"summary": "non_embedded_result", "items": 0, "truncated": False},
+            "raw": _truncate_gwas_text(raw_result, max_chars),
+        }
+
+    max_items = _coerce_int(max_items, 20)
+    max_items = max(1, min(max_items, 100))
+    summarized_embedded: dict[str, Any] = {}
+    any_items = False
+    total = 0
+    for key, value in embedded.items():
+        if not isinstance(value, list):
+            summarized_embedded[key] = value
+            continue
+        total += len(value)
+        any_items = True
+        preview_items = [
+            _extract_gwas_summary_block(item, max_chars=max_chars // 4)
+            for item in value[:max_items]
+        ]
+        metadata = {
+            "total": len(value),
+            "returned": len(preview_items),
+            "truncated": len(value) > max_items,
+        }
+        summarized_embedded[key] = {
+            "items": preview_items,
+            "summary": metadata,
+        }
+        if metadata["truncated"]:
+            summarized_embedded[key]["summary"]["hint"] = "Use max_results to request fewer rows at source."
+
+    result_summary = {
+        "result_type": "gwas_hal_summary",
+        "max_items": max_items,
+        "embedded_blocks": list(summarized_embedded.keys()),
+        "has_items": any_items,
+        "total_items_in_embedded": total,
+    }
+    if isinstance(page, dict):
+        result_summary["page"] = page
+
+    output = {
+        "_links": links,
+        "_embedded": summarized_embedded,
+        "result_summary": result_summary,
+        "gwas_summary": True,
+    }
+    return output
+
+
+def _coerce_request_timeout(timeout: Any) -> float | tuple[float, float]:
+    """Return a valid timeout argument for requests."""
+    if timeout is None:
+        return DEFAULT_HTTP_TIMEOUT
+    if timeout == 0:
+        return DEFAULT_HTTP_TIMEOUT
+
+    if isinstance(timeout, (list, tuple)) and len(timeout) == 2:
+        try:
+            return (float(timeout[0]), float(timeout[1]))
+        except (TypeError, ValueError):
+            return DEFAULT_HTTP_TIMEOUT
+
+    try:
+        value = float(timeout)
+        if value <= 0:
+            return DEFAULT_HTTP_TIMEOUT
+        return value
+    except (TypeError, ValueError):
+        return DEFAULT_HTTP_TIMEOUT
+
+
+def _query_get(endpoint: str, **kwargs: Any):
+    """request.get wrapper with explicit default timeout."""
+    timeout = kwargs.pop("timeout", None)
+    return requests.get(endpoint, timeout=_coerce_request_timeout(timeout), **kwargs)
+
+
+def _query_post(endpoint: str, **kwargs: Any):
+    """request.post wrapper with explicit default timeout."""
+    timeout = kwargs.pop("timeout", None)
+    return requests.post(endpoint, timeout=_coerce_request_timeout(timeout), **kwargs)
 
 
 # Function to map HPO terms to names
@@ -84,6 +446,15 @@ def _query_llm_for_api(prompt, schema, system_template):
         model = "gpt-4o-mini"
         api_key = None
 
+    trace_start = time.perf_counter()
+    trace_id = hex(hash((prompt, model)) & 0xFFFFFFFF) if "model" in locals() else "unknown"
+    _tool_trace(
+        "LLM call start",
+        trace_id=trace_id,
+        model=str(model if "model" in locals() else "unknown"),
+        prompt_chars=len(prompt or ""),
+        schema_len=len(json.dumps(schema, default=str)) if isinstance(schema, dict) else 0,
+    )
     try:
         # Format the system prompt with schema if provided
         if schema is not None:
@@ -143,17 +514,66 @@ def _query_llm_for_api(prompt, schema, system_template):
         else:
             # If no JSON found, try the whole response
             result = json.loads(llm_text)
+        elapsed_ms = _trace_ms(trace_start)
+        _tool_trace(
+            "LLM call end",
+            trace_id=trace_id,
+            elapsed_ms=f"{elapsed_ms}ms",
+            response_chars=len(llm_text),
+            parsed_fields=str(sorted(result.keys())) if isinstance(result, dict) else type(result).__name__,
+        )
 
-        return {"success": True, "data": result, "raw_response": llm_text}
+        return {
+            "success": True,
+            "data": result,
+            "raw_response": llm_text,
+            "query_info": {
+                "model": str(model),
+                "provider": "llm",
+                "elapsed_ms": elapsed_ms,
+                "prompt_chars": len(prompt or ""),
+                "response_chars": len(llm_text),
+            },
+        }
 
     except (json.JSONDecodeError, KeyError, IndexError) as e:
+        elapsed_ms = _trace_ms(trace_start)
+        _tool_trace(
+            "LLM call error",
+            trace_id=trace_id,
+            elapsed_ms=f"{elapsed_ms}ms",
+            error=str(e),
+        )
         return {
             "success": False,
             "error": f"Failed to parse LLM response: {str(e)}",
             "raw_response": llm_text if "llm_text" in locals() else "No content found",
+            "query_info": {
+                "model": str(model),
+                "provider": "llm",
+                "elapsed_ms": elapsed_ms,
+                "prompt_chars": len(prompt or ""),
+            },
         }
     except Exception as e:
-        return {"success": False, "error": f"Error querying LLM: {str(e)}"}
+        elapsed_ms = _trace_ms(trace_start)
+        _tool_trace(
+            "LLM call exception",
+            trace_id=trace_id,
+            elapsed_ms=f"{elapsed_ms}ms",
+            error=str(e),
+        )
+        return {
+            "success": False,
+            "error": f"Error querying LLM: {str(e)}",
+            "raw_response": llm_text if "llm_text" in locals() else "No content found",
+            "query_info": {
+                "model": str(model),
+                "provider": "llm",
+                "elapsed_ms": elapsed_ms,
+                "prompt_chars": len(prompt or ""),
+            },
+        }
 
 
 def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data=None, description=None, timeout=None):
@@ -183,8 +603,23 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
         description = f"{method} request to {endpoint}"
     if timeout is None:
         timeout = DEFAULT_HTTP_TIMEOUT
+    query_info = {
+        "endpoint": endpoint,
+        "method": method,
+        "description": description,
+        "timeout": timeout,
+    }
 
     url_error = None
+    start_time = time.perf_counter()
+    _tool_trace(
+        "HTTP call start",
+        endpoint=endpoint,
+        method=method,
+        has_params=bool(params),
+        has_json=bool(json_data),
+        timeout=timeout,
+    )
 
     try:
         # Make the API request
@@ -205,20 +640,42 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
             # Return raw text if not JSON
             result = {"raw_text": response.text}
 
+        elapsed_ms = _trace_ms(start_time)
+        query_info["elapsed_ms"] = elapsed_ms
+        query_info["status_code"] = getattr(response, "status_code", None)
+        query_info["response_bytes"] = len(response.content) if hasattr(response, "content") else 0
+        _tool_trace(
+            "HTTP call end",
+            endpoint=endpoint,
+            method=method,
+            elapsed_ms=f"{elapsed_ms}ms",
+            status=query_info["status_code"],
+            bytes=query_info["response_bytes"],
+        )
         return {
             "success": True,
-            "query_info": {
-                "endpoint": endpoint,
-                "method": method,
-                "description": description,
-                "timeout": timeout,
-            },
+            "query_info": query_info,
             "result": result,
         }
 
     except Exception as e:
         error_msg = str(e)
         response_text = ""
+        elapsed_ms = _trace_ms(start_time)
+        query_info["elapsed_ms"] = elapsed_ms
+        response_obj = locals().get("response", None)
+        if response_obj is not None:
+            query_info["status_code"] = getattr(response_obj, "status_code", None)
+            query_info["response_bytes"] = (
+                len(response_obj.content) if hasattr(response_obj, "content") else 0
+            )
+        _tool_trace(
+            "HTTP call error",
+            endpoint=endpoint,
+            method=method,
+            elapsed_ms=f"{elapsed_ms}ms",
+            error=str(e),
+        )
 
         # Try to get more detailed error info from response
         if hasattr(e, "response") and e.response:
@@ -238,12 +695,7 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
         return {
             "success": False,
             "error": f"API error: {error_msg}",
-            "query_info": {
-                "endpoint": endpoint,
-                "method": method,
-                "description": description,
-                "timeout": timeout,
-            },
+            "query_info": query_info,
             "response_url_error": url_error,
             "response_text": response_text,
         }
@@ -733,7 +1185,7 @@ def query_alphafold(
 
     try:
         # Make the API request
-        response = requests.get(url)
+        response = _query_get(url)
         response.raise_for_status()
 
         # Parse the response as JSON
@@ -756,7 +1208,7 @@ def query_alphafold(
             download_url = f"https://alphafold.ebi.ac.uk/files/{filename}"
 
             # Download the file
-            download_response = requests.get(download_url)
+            download_response = _query_get(download_url)
             if download_response.status_code == 200:
                 with open(file_path, "wb") as f:
                     f.write(download_response.content)
@@ -1093,7 +1545,7 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                     data_url = f"https://data.rcsb.org/rest/v1/core/chem_comp/{identifier}"
 
                 # Fetch data
-                data_response = requests.get(data_url)
+                data_response = _query_get(data_url)
                 data_response.raise_for_status()
                 entity_data = data_response.json()
 
@@ -1132,7 +1584,7 @@ def query_pdb_identifiers(identifiers, return_type="entry", download=False, attr
                 try:
                     # Download PDB file
                     pdb_url = f"https://files.rcsb.org/download/{pdb_id}.pdb"
-                    pdb_response = requests.get(pdb_url)
+                    pdb_response = _query_get(pdb_url)
 
                     if pdb_response.status_code == 200:
                         # Create data directory if it doesn't exist
@@ -1352,7 +1804,7 @@ def query_stringdb(
         if download_image:
             # For images, we need to handle the download manually
             try:
-                response = requests.get(endpoint, stream=True)
+                response = _query_get(endpoint, stream=True)
                 response.raise_for_status()
 
                 # Create output directory if needed
@@ -1617,7 +2069,7 @@ def query_paleobiology(
     if is_image:
         # For image queries, we need special handling
         try:
-            response = requests.get(endpoint)
+            response = _query_get(endpoint)
             response.raise_for_status()
 
             # Return image metadata without the binary data
@@ -2817,6 +3269,7 @@ def query_gwas_catalog(
     # Ensure we have either a prompt or an endpoint
     if prompt is None and endpoint is None:
         return {"error": "Either a prompt or an endpoint must be provided"}
+    llm_query_info: dict[str, Any] = {}
 
     # If using prompt, parse with Claude
     if prompt:
@@ -2859,10 +3312,19 @@ def query_gwas_catalog(
         if not llm_result["success"]:
             return llm_result
 
+        llm_query_info = llm_result.get("query_info", {})
+
         # Get the endpoint and parameters from Claude's response
         query_info = llm_result["data"]
         endpoint = query_info.get("endpoint", "")
+        endpoint, llm_endpoint_params = _extract_gwas_endpoint_and_params(endpoint)
         params = query_info.get("params", {})
+        if isinstance(llm_endpoint_params, dict):
+            merged = {}
+            merged.update(llm_endpoint_params)
+            if isinstance(params, dict):
+                merged.update(params)
+            params = merged
         description = query_info.get("description", "")
 
         if not endpoint:
@@ -2870,21 +3332,54 @@ def query_gwas_catalog(
                 "error": "Failed to generate a valid endpoint from the prompt",
                 "llm_response": llm_result.get("raw_response", "No response"),
             }
+
+        if _extract_gwas_endpoint_root(endpoint) not in _GWAS_ENDPOINT_PREFIXES:
+            return {
+                "error": f"Invalid GWAS endpoint provided by LLM: {endpoint}. "
+                f"Allowed roots: {', '.join(_GWAS_ENDPOINT_PREFIXES)}"
+            }
     else:
         if endpoint is None:
             endpoint = ""  # Use root endpoint
-        params = {"size": max_results}
+        endpoint, params = _extract_gwas_endpoint_and_params(endpoint)
+        if not isinstance(params, dict):
+            params = {}
         description = f"Direct query to {endpoint}"
 
-    # Remove leading slash if present
-    if endpoint.startswith("/"):
-        endpoint = endpoint[1:]
+    if not endpoint:
+        return {"error": "Failed to resolve a valid GWAS endpoint"}
+
+    endpoint = _normalize_gwas_endpoint(endpoint)
 
     # Construct the URL
     url = f"{base_url}/{endpoint}"
 
+    if not isinstance(params, dict):
+        params = {}
+    params = _clamp_gwas_params(params, max_results)
+    query_timeout = _get_gwas_timeout()
+
     # Execute the GWAS Catalog API request using the helper function
-    api_result = _query_rest_api(endpoint=url, method="GET", params=params, description=description)
+    api_result = _query_rest_api(
+        endpoint=url,
+        method="GET",
+        params=params,
+        description=description,
+        timeout=query_timeout,
+    )
+    if isinstance(api_result, dict) and isinstance(api_result.get("query_info"), dict):
+        api_result["query_info"]["llm"] = llm_query_info
+
+    if isinstance(api_result, dict) and api_result.get("success"):
+        raw_result = api_result.get("result")
+        summary = _summarize_gwas_result(raw_result, max_items=max_results)
+        if summary.get("gwas_summary"):
+            api_result["result_summary"] = summary.pop("result_summary")
+            summary.pop("gwas_summary", None)
+            api_result["result_raw"] = raw_result
+            api_result["result"] = summary
+        else:
+            api_result["result"] = summary
 
     return api_result
 
@@ -3279,7 +3774,7 @@ def query_reactome(
         if pathway_id and output_dir:
             diagram_url = f"{content_base_url}/data/pathway/{pathway_id}/diagram"
             try:
-                diagram_response = requests.get(diagram_url)
+                diagram_response = _query_get(diagram_url)
                 diagram_response.raise_for_status()
 
                 # Save diagram file
@@ -3618,7 +4113,7 @@ def region_to_ccre_screen(coord_chrom: str, coord_start: int, coord_end: int, as
         steps.append(str(data))
 
         # Make the request
-        response = requests.post(url, json=data)
+        response = _query_post(url, json=data)
 
         # Check if the response is successful
         if not response.ok:
@@ -3717,7 +4212,7 @@ def get_genes_near_ccre(accession: str, assembly: str, chromosome: str, k: int =
     data = {"accession": accession, "assembly": assembly, "coord_chrom": chromosome}
 
     steps_log += "Sending POST request to API with given data.\n"
-    response = requests.post(url, json=data)
+    response = _query_post(url, json=data)
 
     if not response.ok:
         steps_log += f"API request failed with response: {response.text}\n"

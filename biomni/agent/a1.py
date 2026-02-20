@@ -270,7 +270,18 @@ class A1:
 
         # Add timeout parameter
         self.timeout_seconds = timeout_seconds  # 10 minutes default timeout
+        self.tool_call_budget_per_step = self._get_tool_call_budget()
         self.configure()
+
+    @staticmethod
+    def _get_tool_call_budget() -> int:
+        """Read tool-call budget from env with safe fallback."""
+        raw_value = os.getenv("BIOMNI_TOOL_CALL_MAX_PER_STEP", "20")
+        try:
+            budget = int(raw_value)
+            return budget if budget > 0 else 20
+        except (TypeError, ValueError):
+            return 20
 
     def add_tool(self, api):
         """Add a new tool to the agent's tool registry and make it available for retrieval.
@@ -1190,14 +1201,6 @@ For R code, use the #!R marker at the beginning of your code block to indicate i
 For Bash scripts and commands, use the #!BASH marker at the beginning of your code block. This allows for both simple commands and multi-line scripts with variables, loops, conditionals, loops, and other Bash features.
 
 In each response, you must include EITHER <execute> or <solution> tag. Not both at the same time. Do not respond with messages without any tags. No empty messages.
-
-CODE EXECUTION GUARDRAILS:
-- Every <execute> block must include required import statements for any library aliases used.
-- Before accessing DataFrame columns, inspect the table first with print(df.columns.tolist()) and print(df.head(3)).
-- Work incrementally: verify key variables (e.g., print(type(df), df.shape)) before reusing them in later steps.
-- Avoid large per-item external API loops (e.g., one API call for every candidate variant/gene).
-- For GWAS variant prioritization, prefer loading local data lake files (e.g., gwas_catalog.pkl) once and ranking candidates locally.
-- If external API access is needed, use a small number of focused calls and summarize intermediate results.
 """
 
         # Add self-critic instructions if needed
@@ -1525,6 +1528,26 @@ Each library is listed with its description to help you understand its functiona
             execute_match = re.search(r"<execute>(.*?)</execute>", last_message, re.DOTALL)
             if execute_match:
                 code = execute_match.group(1)
+
+                # Enforce per-step tool-call budget to avoid runaway tool loops.
+                tool_calls = []
+                try:
+                    tool_calls = self._parse_tool_calls_from_code(code)
+                except Exception:
+                    tool_calls = []
+
+                if self.tool_call_budget_per_step and len(tool_calls) > self.tool_call_budget_per_step:
+                    warning_message = (
+                        "Tool call budget exceeded for one step. "
+                        "Please reduce the number of tool calls in this execution block and retry."
+                    )
+                    state["messages"].append(
+                        HumanMessage(
+                            content=warning_message
+                        )
+                    )
+                    state["next_step"] = "generate"
+                    return state
 
                 # Set timeout duration (10 minutes = 600 seconds)
                 timeout = self.timeout_seconds

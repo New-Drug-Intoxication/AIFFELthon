@@ -11,12 +11,18 @@ from tqdm import tqdm
 
 from biomni.llm import get_llm
 
+
+from biomni.utils import run_with_timeout
+
 _GGET_MODULE = None
 _GGET_IMPORT_ERROR: Exception | None = None
 _GGET_MISSING_MESSAGE = "Optional dependency 'gget' is required. Install it with `pip install gget`."
 _GSEAPY_MODULE = None
 _GSEAPY_IMPORT_ERROR: Exception | None = None
 _SCANPY_IMPORT_ERROR: Exception | None = None
+
+_ARCHS4_RESULT_CACHE: dict[tuple[str, int], str] = {}
+_ARCHS4_TIMEOUT_DEFAULT_SECONDS = 20
 
 try:
     import scanpy as sc
@@ -1051,36 +1057,73 @@ def get_rna_seq_archs4(gene_name: str, K: int = 10) -> str:
     - str: The steps performed and the result.
 
     """
-    steps_log = f"Starting RNA-seq data fetch for gene: {gene_name} with K: {K}\n"
+    if not isinstance(gene_name, str):
+        return "Error: gene_name must be a string."
+
+    gene_name = gene_name.strip()
+    if not gene_name:
+        return "Error: gene_name cannot be empty."
 
     try:
+        k_value = int(K)
+    except (TypeError, ValueError):
+        return "Error: K must be an integer."
+    if k_value < 1:
+        return "Error: K must be >= 1."
+
+    cache_key = (gene_name.lower(), k_value)
+    if cache_key in _ARCHS4_RESULT_CACHE:
+        return _ARCHS4_RESULT_CACHE[cache_key] + "\n[cache] Reused cached ArchS4 result."
+
+    steps_log = f"Starting RNA-seq data fetch for gene: {gene_name} with K: {k_value}\n"
+
+    timeout_value = os.getenv("BIOMNI_ARCHS4_TIMEOUT_SECONDS", str(_ARCHS4_TIMEOUT_DEFAULT_SECONDS))
+    try:
+        archs4_timeout = float(timeout_value)
+    except (TypeError, ValueError):
+        archs4_timeout = float(_ARCHS4_TIMEOUT_DEFAULT_SECONDS)
+
+    def _run_archs4_lookup() -> str:
         gget = _require_gget()
-        # Fetch RNA-seq data using gget
-        steps_log += "Fetching RNA-seq data using gget.archs4...\n"
+        steps_log_local = steps_log + "Fetching RNA-seq data using gget.archs4...\n"
+
         data = gget.archs4(gene_name, which="tissue")
 
-        if data.empty:
-            steps_log += f"No RNA-seq data found for the gene {gene_name}.\n"
-            return steps_log
+        if data is None or (hasattr(data, "empty") and data.empty):
+            return f"{steps_log_local}No RNA-seq data found for the gene {gene_name}."
 
-        # Create a readable output string
-        steps_log += f"RNA-seq expression data for {gene_name} fetched successfully. Formatting the top {K} tissues:\n"
+        steps_log_local += (
+            f"RNA-seq expression data for {gene_name} fetched successfully. Formatting the top {k_value} tissues:\n"
+        )
         readable_output = ""
         for index, row in data.iterrows():
-            if index < K:
+            if index < k_value:
                 tissue = row["id"]
                 median_tpm = row["median"]
                 readable_output += f"\nTissue: {tissue}\n  - Median TPM: {median_tpm}\n"
             else:
                 break
 
-        steps_log += readable_output
-        return steps_log
+        return steps_log_local + readable_output
 
-    except RuntimeError as e:
-        return str(e)
-    except Exception as e:
-        return f"An error occurred: {e}"
+    try:
+        result = run_with_timeout(_run_archs4_lookup, timeout=archs4_timeout)
+    except Exception as exc:
+        return str(exc)
+
+    if isinstance(result, str) and (
+        result.startswith("TIMEOUT:") or result.startswith("ERROR:") or "timed out" in result.lower()
+    ):
+        # Keep timeout behavior visible and actionable.
+        timeout_hint = (
+            "Get RNA-seq by ArchS4 timed out. "
+            "Use fewer genes/iterations, reduce K, or retry without ArchS4 using simpler summary paths."
+        )
+        return f"{result}\n{timeout_hint}"
+
+    if isinstance(result, str):
+        _ARCHS4_RESULT_CACHE[cache_key] = result
+    return result
 
 
 def get_gene_set_enrichment_analysis_supported_database_list() -> list:
