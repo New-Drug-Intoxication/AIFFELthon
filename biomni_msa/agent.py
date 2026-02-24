@@ -230,10 +230,27 @@ class MSAAgent:
             allowed_owners=set(selected_agents) | {"Common"},
         )
         state.final_master_plan = final_plan
+        final_lines = []
+        for idx, step in enumerate(final_plan, start=1):
+            step_text = str(getattr(step, "step", "")).strip()
+            owner = str(getattr(step, "owner_agent", "Common")).strip() or "Common"
+            success = (
+                str(getattr(step, "success_criteria", "done")).strip() or "done"
+            )
+            if not step_text:
+                continue
+            final_lines.append(
+                f"{idx}. [ ] {step_text} | owner_agent: {owner} | success_criteria: {success}"
+            )
+        final_content = (
+            "\n".join(final_lines)
+            if final_lines
+            else f"final steps={len(final_plan)}"
+        )
         self._emit(
             state,
             "[Orchestrator R3.1 Message]",
-            f"final steps={len(final_plan)}",
+            final_content,
             {"final_master_plan": [asdict(x) for x in final_plan]},
             stream,
         )
