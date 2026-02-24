@@ -159,10 +159,25 @@ class MSAAgent:
                 ),
             }
             domain_r2_outputs.append({"domain": domain, **r2})
+            r2_steps = r2.get("checklist_steps", [])
+            r2_lines = []
+            for idx, step in enumerate(r2_steps, start=1):
+                step_text = str(step.get("step", "")).strip()
+                success = str(step.get("success_criteria", "done")).strip() or "done"
+                if not step_text:
+                    continue
+                r2_lines.append(
+                    f"{idx}. [ ] {step_text} | success_criteria: {success}"
+                )
+            r2_content = (
+                "\n".join(r2_lines)
+                if r2_lines
+                else f"steps={len(r2_steps)}"
+            )
             self._emit(
                 state,
                 f"[Plan-R2 | {domain} Message]",
-                f"steps={len(r2.get('checklist_steps', []))}",
+                r2_content,
                 r2,
                 stream,
             )
@@ -170,10 +185,27 @@ class MSAAgent:
         self._set_state(state, WorkflowState.S_PLAN_R21)
         draft_plan = self._orchestrator_r21(domain_r2_outputs, state.user_query)
         state.draft_master_plan = draft_plan
+        draft_lines = []
+        for idx, step in enumerate(draft_plan, start=1):
+            step_text = str(getattr(step, "step", "")).strip()
+            owner = str(getattr(step, "owner_agent", "Common")).strip() or "Common"
+            success = (
+                str(getattr(step, "success_criteria", "done")).strip() or "done"
+            )
+            if not step_text:
+                continue
+            draft_lines.append(
+                f"{idx}. [ ] {step_text} | owner_agent: {owner} | success_criteria: {success}"
+            )
+        draft_content = (
+            "\n".join(draft_lines)
+            if draft_lines
+            else f"draft steps={len(draft_plan)}"
+        )
         self._emit(
             state,
             "[Orchestrator R2.1 Message]",
-            f"draft steps={len(draft_plan)}",
+            draft_content,
             {"draft_master_plan": [asdict(x) for x in draft_plan]},
             stream,
         )
