@@ -51,14 +51,11 @@
   ---
 
    [응답 형식]
-
-
-   1. `<think>`: 실행 결과의 구체적인 내용 분석, 데이터의 정합성 검토, 그리고 위 세 가지 경로 중 하나를 선택한 전문가적 추론 과정을 상세히 기술하십시오.
-   2. 검토 결과(JSON만 출력):
+   검토 결과(JSON만 출력):
       {
         "status": "SUCCESS | FAILURE | PLAN_REVISION",
         "reason": "판정 근거",
-        "immediate_action": "즉시 수행할 조치",
-        "observe_output": "검토에 사용한 observation_output 원문 또는 핵심 발췌"
+        "immediate_action": "즉시 수행할 조치"
       }
+   - optional: "observe_output"
    - status 값은 반드시 정확히 SUCCESS, FAILURE, PLAN_REVISION 중 하나만 사용하십시오.

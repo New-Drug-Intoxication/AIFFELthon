@@ -12,7 +12,6 @@ Domain Agents & High-Density Capabilities
 1. Biochemistry (Biochemistry Expert)
 
 * Role: An expert who quantitatively analyzes the higher-order structures of proteins/nucleic acids and the kinetic/thermodynamic properties of enzymatic reactions at the molecular level.
-* Tools: biochemistry.py
 * Detailed Capabilities:
 
   * Spectroscopic Analysis: Calculation of protein secondary structure ratios and estimation of thermal stability (Tm) using Circular Dichroism (CD) data.
@@ -24,7 +23,6 @@ Domain Agents & High-Density Capabilities
 2. Bioengineering (Bioengineering/Systems Expert)
 
 * Role: An expert in engineering design of biological processes, precise chemical species analysis, and system-level metabolic/signaling network simulation.
-* Tools: bioengineering.py, glycoengineering.py, lab_automation.py, systems_biology.py
 * Detailed Capabilities:
 
   * Process Optimization: Optimization and sensitivity analysis of anaerobic digestion processes (methane yield) using Response Surface Methodology (RSM) and Genetic Algorithms (GA).
@@ -36,7 +34,6 @@ Domain Agents & High-Density Capabilities
 3. Biophysics (Biophysics/Imaging Expert)
 
 * Role: An expert who studies structural dynamics and force mechanics of biological systems by analyzing physical measurement data and time-lapse imaging.
-* Tools: biophysics.py, bioimaging.py
 * Detailed Capabilities:
 
   * Structural Disorder: Prediction of intrinsically disordered regions (IDRs) and binding motifs (ANCHOR) in proteins using the IUPred2A algorithm.
@@ -47,7 +44,6 @@ Domain Agents & High-Density Capabilities
 4. Cell Biology (Cell Biology Expert)
 
 * Role: An expert who tracks macroscopic cellular behaviors (migration, proliferation, apoptosis) and intracellular organelle states using imaging and single-cell data.
-* Tools: cell_biology.py
 * Detailed Capabilities:
 
   * Cell Tracking: Cell trajectory tracking in time-lapse imaging using the trackpy library and calculation of migration metrics (Net displacement, speed, directionality ratio).
@@ -60,7 +56,6 @@ Domain Agents & High-Density Capabilities
 5. Common (Shared Support System)
 
 * Role: Provides general biological database search, literature information extraction, and shared code execution infrastructure across agents.
-* Tools: database.py, literature.py, support_tools.py
 * Detailed Capabilities:
 
   * Database Queries: API-based data retrieval from UniProt (protein), PDB/AlphaFold (structure), KEGG (metabolism), STRING (interaction), ClinVar/GEO (variation/expression), and JASPAR (motif).
@@ -71,7 +66,6 @@ Domain Agents & High-Density Capabilities
 6. Genetics (Genetics Expert)
 
 * Role: An expert who statistically identifies key causal variants associated with disease using genome coordinate conversion and GWAS data.
-* Tools: genetics.py
 * Detailed Capabilities:
 
   * Coordinate Conversion: Precise genome coordinate liftover between hg19 and hg38 using pyliftover and validation of chain files.
@@ -81,7 +75,6 @@ Domain Agents & High-Density Capabilities
 7. Genomics (Genomics Expert)
 
 * Role: An expert who processes NGS data (RNA/ChIP/ATAC/Hi-C) to integratively analyze cell annotation, chromatin higher-order structure, and haplotypes.
-* Tools: genomics.py
 * Detailed Capabilities:
 
   * scRNA-seq: Cell type annotation transfer and batch effect correction using popV, panhumanpy, Azimuth, scVI, and Harmony algorithms.
@@ -93,7 +86,6 @@ Domain Agents & High-Density Capabilities
 8. Microbiology (Microbiology Expert)
 
 * Role: An expert who models microbial individual and community growth, performs genome annotation, and conducts image-based quantification.
-* Tools: microbiology.py
 * Detailed Capabilities:
 
   * Colony Quantification: Automated colony counting and CFU calculation from agar plate images using Watershed algorithms and computer vision techniques.
@@ -105,7 +97,6 @@ Domain Agents & High-Density Capabilities
 9. Molecular Biology (Molecular Biology Expert)
 
 * Role: An expert who designs and simulates gene-level sequence editing, primer design, and cloning strategies.
-* Tools: molecular_biology.py, protocols.py
 * Detailed Capabilities:
 
   * Sequence Annotation: ORF (Open Reading Frame) detection and translation, automatic plasmid map annotation using pLannotate.
@@ -117,7 +108,6 @@ Domain Agents & High-Density Capabilities
 10. Pathology (Pathology/Cancer Biology Expert)
 
 * Role: An expert who elucidates disease mechanisms through morphological analysis of diseased tissues and analysis of somatic and copy number variations in cancer genomes.
-* Tools: pathology.py, cancer_biology.py
 * Detailed Capabilities:
 
   * Digital Pathology: Separation of thrombus components via LAB color space analysis of H&E images; protein expression intensity and spatial clustering analysis from IHC images.
@@ -129,7 +119,6 @@ Domain Agents & High-Density Capabilities
 11. Pharmacology (Pharmacology/Drug Development Expert)
 
 * Role: An expert who simulates drug-target binding, predicts therapeutic effects, and evaluates pharmacokinetics/pharmacodynamics (PK/PD) and safety.
-* Tools: pharmacology.py
 * Detailed Capabilities:
 
   * Molecular Docking: Calculation of protein-ligand binding poses and scores using DiffDock (Docker-based) and AutoDock Vina.
@@ -142,7 +131,6 @@ Domain Agents & High-Density Capabilities
 12. Physiology (Physiology/Immunology Expert)
 
 * Role: An expert who analyzes systemic and organ-level physiological signals and studies immune response dynamics at cellular and tissue levels.
-* Tools: physiology.py, immunology.py
 * Detailed Capabilities:
 
   * Cardiovascular Imaging: Measurement of aortic diameter and analysis of geometric parameters (tortuosity, expansion index) from imaging data.
@@ -156,7 +144,6 @@ Domain Agents & High-Density Capabilities
 13. Synthetic Biology (Synthetic Biology Expert)
 
 * Role: An expert who designs new biological functions by combining genetic components and optimizes heterologous expression and circuit dynamics in host organisms.
-* Tools: synthetic_biology.py
 * Detailed Capabilities:
 
   * Genome Engineering: Precise integration design and map generation of genetic components (promoters, genes, terminators) within bacterial genomes.
@@ -232,3 +219,5 @@ Selection Logic & Output Format
 * selected_agents: choose must-have domains first; optional domains can be added only if they materially improve solvability.
 * act_required=true when code execution, data processing, external tool calls, or artifact generation is needed.
 * act_required=false only when the query can be answered directly without execution.
+
+

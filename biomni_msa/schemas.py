@@ -66,3 +66,7 @@ class MSAState:
     replan_history: list[dict[str, Any]] = field(default_factory=list)
     state_transition_history: list[str] = field(default_factory=list)
     messages: list[MessageEvent] = field(default_factory=list)
+    token_usage_by_stage: dict[str, dict[str, int]] = field(default_factory=dict)
+    token_usage_total: dict[str, int] = field(
+        default_factory=lambda: {"input": 0, "output": 0, "total": 0}
+    )

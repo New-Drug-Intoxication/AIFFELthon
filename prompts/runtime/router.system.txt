@@ -219,3 +219,5 @@ Selection Logic & Output Format
 * selected_agents: choose must-have domains first; optional domains can be added only if they materially improve solvability.
 * act_required=true when code execution, data processing, external tool calls, or artifact generation is needed.
 * act_required=false only when the query can be answered directly without execution.
+
+

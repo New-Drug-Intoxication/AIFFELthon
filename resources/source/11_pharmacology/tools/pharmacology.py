@@ -10,6 +10,14 @@ import numpy as np
 import pandas as pd
 
 
+def _default_data_lake_path() -> str:
+    here = os.path.dirname(__file__)
+    repo_root = os.path.abspath(
+        os.path.join(here, os.pardir, os.pardir, os.pardir, os.pardir)
+    )
+    return os.getenv("MSA_DATA_LAKE_ROOT", os.path.join(repo_root, "data_lake"))
+
+
 def run_diffdock_with_smiles(pdb_path, smiles_string, local_output_dir, gpu_device=0, use_gpu=True):
     try:
         summary = []
@@ -2474,8 +2482,7 @@ def _load_ddinter_data(data_lake_path):
     import os
     import pickle
 
-    # Define schema directory (following established pattern)
-    schema_dir = os.path.join(os.path.dirname(__file__), "schema_db")
+    schema_dir = data_lake_path
 
     # Define paths to DDInter pickle files
     drug_info_path = os.path.join(schema_dir, "ddinter_drugs.pkl")
@@ -2827,8 +2834,7 @@ def query_drug_interactions(drug_names, interaction_types=None, severity_levels=
 
     # Handle default data lake path
     if data_lake_path is None:
-        # Default path assuming standard Biomni structure
-        data_lake_path = os.path.join(os.path.dirname(__file__), "schema_db")
+        data_lake_path = _default_data_lake_path()
 
     log += "Query Parameters:\n"
     log += f"- Target drugs: {', '.join(drug_names)}\n"
@@ -2958,7 +2964,7 @@ def check_drug_combination_safety(drug_list, include_mechanisms=True, include_ma
 
     # Handle default data lake path
     if data_lake_path is None:
-        data_lake_path = os.path.join(os.path.dirname(__file__), "schema_db")
+        data_lake_path = _default_data_lake_path()
 
     log += "Safety Analysis Parameters:\n"
     log += f"- Drug combination: {', '.join(drug_list)}\n"
@@ -3121,7 +3127,7 @@ def analyze_interaction_mechanisms(drug_pair, detailed_analysis=True, data_lake_
 
     # Handle default data lake path
     if data_lake_path is None:
-        data_lake_path = os.path.join(os.path.dirname(__file__), "schema_db")
+        data_lake_path = _default_data_lake_path()
 
     drug_a, drug_b = drug_pair
     log += "Mechanism Analysis Parameters:\n"
@@ -3279,7 +3285,7 @@ def find_alternative_drugs_ddinter(target_drug, contraindicated_drugs, therapeut
 
     # Handle default data lake path
     if data_lake_path is None:
-        data_lake_path = os.path.join(os.path.dirname(__file__), "schema_db")
+        data_lake_path = _default_data_lake_path()
 
     log += "Alternative Drug Search Parameters:\n"
     log += f"- Target drug: {target_drug}\n"

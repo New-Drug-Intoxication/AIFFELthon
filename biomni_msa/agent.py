@@ -8,7 +8,7 @@ import sys
 from dataclasses import asdict
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from biomni_msa.config import AgentRuntimeConfig, MSAPaths
 from biomni_msa.core.execution import (
@@ -17,6 +17,7 @@ from biomni_msa.core.execution import (
     run_with_timeout,
 )
 from biomni_msa.data_lake import ensure_data_lake_files
+from biomni_msa.graph import build_msa_graph
 from biomni_msa.llm_backend import LLMBackend
 from biomni_msa.prompt_store import PromptStore
 from biomni_msa.resource_store import ResourceStore
@@ -54,6 +55,7 @@ class MSAAgent:
         paths: MSAPaths | None = None,
         runtime: AgentRuntimeConfig | None = None,
         llm_model: str | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.paths = paths or MSAPaths.default()
         self.runtime = runtime or AgentRuntimeConfig()
@@ -64,10 +66,9 @@ class MSAAgent:
         self.domain_profiles = self._load_domain_profiles()
         self.domain_runtime: dict[str, dict[str, Any]] = {}
         resolved_model = llm_model or os.getenv("MSA_LLM") or os.getenv("MSA_LLM_MODEL")
-        self.context_compact = (
-            str(os.getenv("MSA_CONTEXT_COMPACT", "false")).lower() == "true"
-        )
         self.llm = LLMBackend(model_name=resolved_model)
+        self.graph = build_msa_graph(self)
+        self.event_callback = event_callback
 
     def go(
         self, query: str, verbose: bool | None = None, stream: bool = False
@@ -75,51 +76,56 @@ class MSAAgent:
         normalized_query = str(query).strip()
         show_trace = self.runtime.verbose_default if verbose is None else verbose
         state = MSAState(user_query=normalized_query)
-        self._set_state(state, WorkflowState.S_ROUTER)
+        self.llm.reset_usage()
+        final_answer = ""
+        try:
+            if not normalized_query:
+                self._set_state(state, WorkflowState.S_ROUTER)
+                router_out = RouterOutput(
+                    selected_agents=[],
+                    route_reason="empty_user_query",
+                    act_required=False,
+                    domain_scores={},
+                )
+                state.router_output = router_out
+                self._emit(
+                    state,
+                    "[Router Message]",
+                    "selected=[], act_required=False (empty query)",
+                    asdict(router_out),
+                    stream,
+                )
+                self._set_state(state, WorkflowState.S_SYNTHESIZER)
+                final_answer = (
+                    "입력된 쿼리가 없습니다. 질의를 입력한 뒤 다시 실행해 주세요."
+                )
+                self._emit(state, "[Synthesizer Message]", final_answer, None, stream)
+                self._sync_token_usage(state)
+                if stream:
+                    totals = state.token_usage_total
+                    print(
+                        "[Token Summary] "
+                        f"input token: {int(totals.get('input', 0))}, "
+                        f"output token: {int(totals.get('output', 0))}, "
+                        f"total token: {int(totals.get('total', 0))}"
+                    )
+                return self._result(state, final_answer, show_trace)
 
-        if not normalized_query:
-            router_out = RouterOutput(
-                selected_agents=[],
-                route_reason="empty_user_query",
-                act_required=False,
-                domain_scores={},
-            )
-            state.router_output = router_out
-            self._emit(
-                state,
-                "[Router Message]",
-                "selected=[], act_required=False (empty query)",
-                asdict(router_out),
-                stream,
-            )
-            self._set_state(state, WorkflowState.S_SYNTHESIZER)
-            answer = "입력된 쿼리가 없습니다. 질의를 입력한 뒤 다시 실행해 주세요."
-            self._emit(state, "[Synthesizer Message]", answer, None, stream)
-            return self._result(state, answer, show_trace)
-
-        router_out = self._router_stage(state)
-        state.router_output = router_out
-        self._emit(
-            state,
-            "[Router Message]",
-            f"selected={router_out.selected_agents}, act_required={router_out.act_required}",
-            asdict(router_out),
-            stream,
-        )
-
-        if not router_out.act_required:
-            self._set_state(state, WorkflowState.S_SYNTHESIZER)
-            answer = self._synthesize_final(state, mode="no_act", execution_answer="")
-            self._emit(state, "[Synthesizer Message]", answer, None, stream)
-            return self._result(state, answer, show_trace)
-
-        self._run_plan_pipeline(state, router_out.selected_agents, stream)
-
-        answer = self._execution_loop(state, stream=stream)
-        self._set_state(state, WorkflowState.S_SYNTHESIZER)
-        answer = self._synthesize_final(state, mode="act", execution_answer=answer)
-        self._emit(state, "[Synthesizer Message]", answer, None, stream)
-        return self._result(state, answer, show_trace)
+            result_state = self.graph.invoke({"msa_state": state, "stream": stream})
+            final_answer = str(result_state.get("final_answer", ""))
+            self._sync_token_usage(state)
+            if stream:
+                totals = state.token_usage_total
+                print(
+                    "[Token Summary] "
+                    f"input token: {int(totals.get('input', 0))}, "
+                    f"output token: {int(totals.get('output', 0))}, "
+                    f"total token: {int(totals.get('total', 0))}"
+                )
+            return self._result(state, final_answer, show_trace)
+        except Exception:
+            self._sync_token_usage(state)
+            raise
 
     def _run_plan_pipeline(
         self,
@@ -188,6 +194,7 @@ class MSAAgent:
         final_plan = self._orchestrator_r31(
             draft_plan,
             domain_r3_outputs,
+            query=state.user_query,
             allowed_owners=set(selected_agents) | {"Common"},
         )
         state.final_master_plan = final_plan
@@ -200,6 +207,7 @@ class MSAAgent:
         )
 
     def _router_stage(self, state: MSAState) -> RouterOutput:
+        cutoff = 0.8
         prompt = self._inject_prompt(
             self.prompts.router(),
             {"user_query": state.user_query},
@@ -222,11 +230,24 @@ class MSAAgent:
             str(k): max(0.0, min(1.0, float(v)))
             for k, v in payload.get("domain_scores", {}).items()
         }
-        selected_norm = [str(x) for x in selected if str(x) in DOMAINS]
+        selected_norm = [
+            str(x)
+            for x in selected
+            if str(x) in DOMAINS and float(domain_scores.get(str(x), 0.0)) >= cutoff
+        ]
         if not selected_norm:
-            raise RuntimeError(
-                "Router selected_agents became empty after policy enforcement"
+            # Keep pipeline moving: if cutoff removes all, keep the highest-scored
+            # originally selected domain as a fallback.
+            original_selected = [str(x) for x in selected if str(x) in DOMAINS]
+            if not original_selected:
+                raise RuntimeError(
+                    "Router selected_agents became empty after policy enforcement"
+                )
+            best = max(
+                original_selected,
+                key=lambda d: float(domain_scores.get(d, 0.0)),
             )
+            selected_norm = [best]
         return RouterOutput(
             selected_agents=selected_norm,
             route_reason=str(payload.get("route_reason", "")),
@@ -251,17 +272,22 @@ class MSAAgent:
                     profile.get("functions", [])
                 ),
                 "user_query": query,
-                "selected_tools_with_desc": self._short_desc_with_index(
-                    indexed["tools"]
+                "selected_tools_with_desc": self._format_resources_for_plan_prompt(
+                    indexed["tools"], include_index=True, include_id=False
                 ),
-                "selected_data_lake_with_desc": self._short_desc_with_index(
-                    indexed["data_lake"]
+                "selected_data_lake_with_desc": self._format_resources_for_plan_prompt(
+                    indexed["data_lake"], include_index=True, include_id=False
                 ),
-                "selected_libraries_with_desc": self._short_desc_with_index(
-                    indexed["libraries"]
+                "selected_libraries_with_desc": self._format_resources_for_plan_prompt(
+                    indexed["libraries"], include_index=True, include_id=False
                 ),
-                "selected_know_how_with_desc": self._short_desc_with_index(
-                    indexed.get("know_how", [])
+                "selected_know_how_section": self._format_plan_optional_section(
+                    "사용 가능한 KNOW-HOW",
+                    self._format_resources_for_plan_prompt(
+                        indexed.get("know_how", []),
+                        include_index=True,
+                        include_id=False,
+                    ),
                 ),
             },
         )
@@ -324,20 +350,27 @@ class MSAAgent:
                 ),
                 "user_query": query,
                 "round1_selected_resources": self._format_round1_selection(r1),
-                "selected_tools_with_desc": self._short_desc_no_id(resolved["tools"]),
-                "selected_data_lake_with_desc": self._short_desc_no_id(
-                    resolved["data_lake"]
+                "selected_tools_with_desc": self._format_resources_for_plan_prompt(
+                    resolved["tools"], include_index=False, include_id=False
                 ),
-                "selected_libraries_with_desc": self._short_desc_no_id(
-                    resolved["libraries"]
+                "selected_data_lake_with_desc": self._format_resources_for_plan_prompt(
+                    resolved["data_lake"], include_index=False, include_id=False
                 ),
-                "selected_know_how_with_desc": self._short_desc_no_id(
-                    resolved.get("know_how", [])
+                "selected_libraries_with_desc": self._format_resources_for_plan_prompt(
+                    resolved["libraries"], include_index=False, include_id=False
+                ),
+                "selected_know_how_section": self._format_plan_optional_section(
+                    "KNOW-HOW",
+                    self._format_resources_for_plan_prompt(
+                        resolved.get("know_how", []),
+                        include_index=False,
+                        include_id=False,
+                    ),
                 ),
                 "revision_instruction": revision_instruction,
             },
         )
-        text = self.llm.complete(prompt).text
+        text = self.llm.complete(prompt, stage=f"plan_r2_text:{domain}").text
         parsed = self._parse_checkbox_steps(
             text,
             stage=f"plan_r2:{domain}",
@@ -423,7 +456,7 @@ class MSAAgent:
             "\n\nAllowed owner agents for this run (use ONLY these values): "
             + ", ".join(sorted(allowed_owners))
         )
-        text = self.llm.complete(prompt).text
+        text = self.llm.complete(prompt, stage="orchestrator_r21_text").text
         rows = self._parse_checkbox_steps(
             text,
             stage="orchestrator_r21",
@@ -480,6 +513,7 @@ class MSAAgent:
         self,
         draft: list[StepSpec],
         critiques: list[dict[str, Any]],
+        query: str,
         allowed_owners: set[str] | None = None,
     ) -> list[StepSpec]:
         normalized: list[StepSpec] = []
@@ -514,6 +548,7 @@ class MSAAgent:
         prompt = self._inject_prompt(
             section,
             {
+                "user_query": query,
                 "draft_master_plan": self._format_plan_steps_for_prompt(draft),
                 "all_agent_round_3_critiques": self._format_critiques_for_prompt(
                     critiques
@@ -525,7 +560,7 @@ class MSAAgent:
             "\n\nAllowed owner agents for this run (use ONLY these values): "
             + ", ".join(sorted(valid_owners))
         )
-        text = self.llm.complete(prompt).text
+        text = self.llm.complete(prompt, stage="orchestrator_r31_text").text
         rows = self._parse_checkbox_steps(
             text,
             stage="orchestrator_r31",
@@ -596,216 +631,10 @@ class MSAAgent:
         return rows
 
     def _execution_loop(self, state: MSAState, stream: bool) -> str:
-        last_output = ""
-        retries: dict[int, int] = {}
-        revision_count = 0
-        full_reset_count = 0
-        previous_handoff: dict[str, Any] | None = None
-        idx = 0
-        while idx < len(state.final_master_plan):
-            step = state.final_master_plan[idx]
-            self._set_state(state, WorkflowState.S_EXEC_R1)
-            self._ensure_data_lake(step.owner_agent)
-            data_catalog = self._build_data_catalog(step.owner_agent)
-            execution_think, execution_code = self._generate_execution_step(
-                step,
-                user_query=state.user_query,
-                context_handoff=previous_handoff,
-                data_catalog=data_catalog,
-            )
-            tool_scope = self._load_tool_scope(step.owner_agent)
-            self._emit(
-                state,
-                f"[Execution-R1 | {step.owner_agent} | Step {step.step_id} Message]",
-                f"Executing: {step.step}",
-                {"execution_think": execution_think, "executed_code": execution_code},
-                stream,
-            )
-            observe_output = self._run_code(execution_code, tool_scope)
-            observe_output = str(observe_output)[: self.runtime.observation_max_chars]
-            self._set_state(state, WorkflowState.S_EXEC_R2)
-            verifier = self._verify_step(step, execution_code, observe_output)
-            self._emit(
-                state,
-                f"[Execution-R2 Verifier | {step.owner_agent} | Step {step.step_id} Message]",
-                f"status={verifier.status.value}, reason={verifier.reason}",
-                asdict(verifier),
-                stream,
-            )
-            state.execution_history.append(
-                {
-                    "step_id": step.step_id,
-                    "owner_agent": step.owner_agent,
-                    "execution_think": execution_think,
-                    "executed_code": execution_code,
-                    "observe_output": observe_output,
-                    "verifier": asdict(verifier),
-                }
-            )
-            last_output = observe_output
-            previous_handoff = {
-                "previous_step_id": step.step_id,
-                "previous_step_observe_output": observe_output,
-            }
-
-            decision = self._orchestrator_exec_decide(
-                state=state,
-                step=step,
-                verifier=verifier,
-                retry_count=retries.get(step.step_id, 0),
-                plan_revision_count=revision_count,
-            )
-            self._emit(
-                state,
-                "[Orchestrator Exec Message]",
-                f"action={decision['action']} instruction={decision['instruction']}",
-                decision,
-                stream,
-            )
-
-            action = str(decision["action"])
-            if (
-                action == "PLAN_REVISION"
-                and verifier.status != VerifierStatus.PLAN_REVISION
-            ):
-                action = "RETRY"
-            if (
-                verifier.status == VerifierStatus.PLAN_REVISION
-                and action != "PLAN_REVISION"
-            ):
-                action = "PLAN_REVISION"
-            if action == "NEXT":
-                idx += 1
-                continue
-            if action == "RETRY":
-                count = retries.get(step.step_id, 0)
-                if count >= self.runtime.step_retry_limit:
-                    state.replan_history.append(
-                        {
-                            "target_step": step.step_id,
-                            "reason": verifier.reason,
-                            "applied": False,
-                            "note": "step_retry_limit_exceeded_without_plan_revision",
-                        }
-                    )
-                    break
-                else:
-                    retries[step.step_id] = count + 1
-                    continue
-            if action == "PLAN_REVISION":
-                if verifier.status != VerifierStatus.PLAN_REVISION:
-                    state.replan_history.append(
-                        {
-                            "target_step": step.step_id,
-                            "reason": verifier.reason,
-                            "applied": False,
-                            "note": "blocked_non_verifier_plan_revision",
-                        }
-                    )
-                    break
-                if revision_count >= self.runtime.plan_revision_limit:
-                    state.replan_history.append(
-                        {
-                            "target_step": step.step_id,
-                            "reason": verifier.reason,
-                            "applied": False,
-                            "note": "plan_revision_limit_exceeded",
-                        }
-                    )
-                    break
-                revision_count += 1
-                target = step.step_id
-                changed = self._partial_replan(
-                    state,
-                    target,
-                    verifier.reason,
-                    verifier.immediate_action,
-                    stream,
-                )
-                if not changed:
-                    break
-                idx = max(0, target - 1)
-                continue
-            if action == "FULL_RESET":
-                if verifier.status != VerifierStatus.PLAN_REVISION:
-                    state.replan_history.append(
-                        {
-                            "target_step": step.step_id,
-                            "reason": verifier.reason,
-                            "applied": False,
-                            "note": "blocked_non_verifier_full_reset",
-                        }
-                    )
-                    retries[step.step_id] = retries.get(step.step_id, 0) + 1
-                    if retries[step.step_id] > self.runtime.step_retry_limit:
-                        break
-                    continue
-                if not self._is_full_reset_exception(verifier.reason):
-                    state.replan_history.append(
-                        {
-                            "target_step": step.step_id,
-                            "reason": verifier.reason,
-                            "applied": False,
-                            "note": "blocked_non_exception_full_reset",
-                        }
-                    )
-                    retries[step.step_id] = retries.get(step.step_id, 0) + 1
-                    if retries[step.step_id] > self.runtime.step_retry_limit:
-                        break
-                    continue
-                if full_reset_count >= 1:
-                    state.replan_history.append(
-                        {
-                            "target_step": step.step_id,
-                            "reason": verifier.reason,
-                            "applied": False,
-                            "note": "full_reset_limit_exceeded",
-                        }
-                    )
-                    break
-                full_reset_count += 1
-                self._set_state(state, WorkflowState.S_ROUTER)
-                router_out = self._router_stage(state)
-                state.router_output = router_out
-                self._emit(
-                    state,
-                    "[Router Message]",
-                    f"selected={router_out.selected_agents}, act_required={router_out.act_required} (full reset)",
-                    asdict(router_out),
-                    stream,
-                )
-                if not router_out.act_required:
-                    self._set_state(state, WorkflowState.S_SYNTHESIZER)
-                    answer = self._synthesize_final(
-                        state, mode="no_act", execution_answer=""
-                    )
-                    self._emit(state, "[Synthesizer Message]", answer, None, stream)
-                    state.replan_history.append(
-                        {
-                            "target_step": step.step_id,
-                            "reason": verifier.reason,
-                            "applied": True,
-                            "note": "full_reset_to_no_act",
-                        }
-                    )
-                    return answer
-                self._run_plan_pipeline(state, router_out.selected_agents, stream)
-                state.replan_history.append(
-                    {
-                        "target_step": step.step_id,
-                        "reason": verifier.reason,
-                        "applied": True,
-                        "note": "full_reset_applied",
-                    }
-                )
-                retries = {}
-                revision_count = 0
-                previous_handoff = None
-                idx = 0
-                continue
-            raise RuntimeError(f"Unknown orchestrator action: {action}")
-
-        return self._synthesize_act(state, last_output)
+        del state, stream
+        raise RuntimeError(
+            "_execution_loop is deprecated. Execution flow is managed by LangGraph nodes."
+        )
 
     def _run_code(self, code: str, tool_scope: dict[str, Any]) -> str:
         try:
@@ -831,17 +660,12 @@ class MSAAgent:
         profile = self.domain_profiles.get(step.owner_agent, {})
         runtime_ctx = self.domain_runtime.get(step.owner_agent, {})
         resolved = runtime_ctx.get("resolved", {})
-        resolved_for_prompt = (
-            self._compact_resolved_for_exec_prompt(resolved)
-            if self.context_compact
-            else resolved
+        tool_bindings = self._build_tool_bindings(
+            step.owner_agent, resolved.get("tools", [])
         )
-        data_catalog_for_prompt = (
-            self._compact_data_catalog_for_exec_prompt(data_catalog)
-            if self.context_compact
-            else data_catalog
-        )
-        catalog_for_prompt = self._compact_data_catalog_for_exec_prompt(data_catalog)
+        allowed_tool_names = [x["name"] for x in tool_bindings]
+        resolved_for_prompt = resolved
+        catalog_for_prompt = data_catalog
         prompt = self._inject_prompt(
             section,
             {
@@ -856,21 +680,32 @@ class MSAAgent:
                 "context_handoff_from_orchestrator": self._format_context_handoff_for_prompt(
                     context_handoff
                 ),
-                "selected_tools_with_desc": self._short_desc_no_id(
-                    resolved_for_prompt.get("tools", []), limit=40
+                "selected_tools_with_desc": self._format_tool_specs_for_exec_prompt(
+                    tool_bindings, limit=80
                 ),
-                "selected_data_lake_with_desc": self._short_desc_no_id(
+                "selected_data_lake_with_desc": self._format_data_resources_for_exec_prompt(
                     resolved_for_prompt.get("data_lake", []), limit=80
                 ),
-                "selected_libraries_with_desc": self._short_desc_no_id(
-                    resolved_for_prompt.get("libraries", []), limit=60
+                "selected_libraries_with_desc": self._format_library_resources_for_exec_prompt(
+                    resolved_for_prompt.get("libraries", []), limit=80
+                ),
+                "allowed_tools_for_exec": self._format_allowed_tools_for_prompt(
+                    allowed_tool_names
                 ),
                 "data_file_candidates": self._format_data_catalog_lines(
                     catalog_for_prompt
                 ),
             },
         )
-        retries = max(1, self.runtime.json_retries + 1)
+        prompt += (
+            "\n\n[Runtime Tool Binding Rule]\n"
+            "- Tool functions are pre-injected into runtime scope.\n"
+            "- Call tool functions directly by function name.\n"
+            "- Do not import tool modules manually.\n"
+            "- DO NOT use `import tools`, `from tools import ...`, or `from msa_tools ...`.\n"
+            f"- Allowed tool names:\n{self._format_allowed_tools_for_prompt(allowed_tool_names)}\n"
+        )
+        retries = max(2, self.runtime.json_retries + 2)
         last_reason = "execute_block_missing"
         for attempt in range(retries):
             attempt_prompt = prompt
@@ -878,10 +713,21 @@ class MSAAgent:
                 attempt_prompt += (
                     "\n\n반드시 하나의 <execute>...</execute> 블록만 출력하십시오."
                     "\n설명문, JSON, 마크다운은 금지합니다."
+                    f"\n직전 실패 사유: {last_reason}"
                 )
-            resp = self.llm.complete(attempt_prompt).text
+            resp = self.llm.complete(
+                attempt_prompt,
+                stage=f"exec_r1:{step.owner_agent}:step{step.step_id}",
+            ).text
             ok, payload = self._extract_execute_block_with_reason(resp)
             if ok:
+                valid, reason = self._validate_exec_code_with_reason(
+                    payload,
+                    allowed_tool_names=set(allowed_tool_names),
+                )
+                if not valid:
+                    last_reason = reason
+                    continue
                 return "", payload
             last_reason = payload
         raise RuntimeError(
@@ -1020,8 +866,27 @@ class MSAAgent:
         if not context_handoff:
             return "- 없음 (첫 단계)"
         sid = context_handoff.get("previous_step_id", "")
-        obs = str(context_handoff.get("previous_step_observe_output", ""))[:1200]
-        return f"- previous_step_id: {sid}\n- previous_step_observe_output: {obs}"
+        status = str(context_handoff.get("previous_step_status", "")).strip()
+        reason = str(context_handoff.get("previous_step_reason", "")).strip()
+        obs = str(context_handoff.get("previous_step_observe_output", "")).strip()
+        action = str(context_handoff.get("orchestrator_instruction", "")).strip()
+        lines: list[str] = []
+        lines.append(f"1. previous_step_id: {sid if sid != '' else '-'}")
+        if status:
+            lines.append(f"2. previous_step_status: {status}")
+        if reason:
+            lines.append(f"3. previous_step_reason: {reason[:400]}")
+        if action:
+            lines.append(f"4. orchestrator_instruction: {action[:500]}")
+        if obs:
+            lines.append("5. previous_step_observe_output:")
+            for row in obs[:1200].splitlines():
+                text = row.strip()
+                if text:
+                    lines.append(f"   - {text}")
+        if len(lines) == 1 and "previous_step_id" in lines[0]:
+            lines.append("2. previous_step_observe_output: -")
+        return "\n".join(lines)
 
     @staticmethod
     def _format_data_catalog_lines(data_catalog: list[dict[str, Any]]) -> str:
@@ -1047,6 +912,20 @@ class MSAAgent:
         return "\n".join(f"- {name}" for name in tool_names if name)
 
     @staticmethod
+    def _format_allowed_import_map_for_prompt(
+        allowed_import_map: dict[str, set[str]],
+    ) -> str:
+        if not allowed_import_map:
+            return "-"
+        lines: list[str] = []
+        for module in sorted(allowed_import_map.keys()):
+            funcs = sorted(x for x in allowed_import_map.get(module, set()) if x)
+            if not funcs:
+                continue
+            lines.append(f"- {module}: {', '.join(funcs)}")
+        return "\n".join(lines) if lines else "-"
+
+    @staticmethod
     def _format_required_map_for_prompt(required_map: dict[str, list[str]]) -> str:
         if not required_map:
             return "-"
@@ -1057,73 +936,6 @@ class MSAAgent:
             required = ", ".join([x for x in reqs if x]) if reqs else "(none)"
             lines.append(f"- {tool}: {required}")
         return "\n".join(lines) if lines else "-"
-
-    @staticmethod
-    def _compact_resolved_for_exec_prompt(resolved: dict[str, Any]) -> dict[str, Any]:
-        tools = []
-        for x in resolved.get("tools", [])[:20]:
-            tools.append(
-                {
-                    "id": x.get("id"),
-                    "name": x.get("name", ""),
-                    "short_description": str(x.get("short_description", ""))[:300],
-                    "required_parameters": x.get("required_parameters", [])[:12],
-                    "optional_parameters": x.get("optional_parameters", [])[:12],
-                }
-            )
-        data_lake = []
-        for x in resolved.get("data_lake", [])[:60]:
-            data_lake.append(
-                {
-                    "id": x.get("id"),
-                    "name": x.get("name", ""),
-                    "short_description": str(x.get("short_description", ""))[:220],
-                }
-            )
-        libraries = []
-        for x in resolved.get("libraries", [])[:40]:
-            libraries.append(
-                {
-                    "id": x.get("id"),
-                    "name": x.get("name", ""),
-                    "short_description": str(x.get("short_description", ""))[:220],
-                    "description": str(x.get("description", ""))[:600],
-                }
-            )
-        know_how = []
-        for x in resolved.get("know_how", [])[:6]:
-            know_how.append(
-                {
-                    "id": x.get("id"),
-                    "name": x.get("name", ""),
-                    "short_description": str(x.get("short_description", ""))[:240],
-                    "content_without_metadata": str(
-                        x.get("content_without_metadata", "")
-                    )[:800],
-                }
-            )
-        return {
-            "tools": tools,
-            "data_lake": data_lake,
-            "libraries": libraries,
-            "know_how": know_how,
-        }
-
-    @staticmethod
-    def _compact_data_catalog_for_exec_prompt(
-        data_catalog: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        compact: list[dict[str, Any]] = []
-        for row in data_catalog[:40]:
-            compact.append(
-                {
-                    "name": row.get("name", ""),
-                    "ext": row.get("ext", ""),
-                    "size": row.get("size", 0),
-                    "columns": [str(x)[:64] for x in row.get("columns", [])[:20]],
-                }
-            )
-        return compact
 
     def _orchestrator_exec_decide(
         self,
@@ -1243,7 +1055,8 @@ class MSAAgent:
             if execution_answer:
                 prompt_lines.append(f"execution_summary={execution_answer}")
             prompt = "\n".join(prompt_lines) + "\n"
-        text = self.llm.complete(prompt).text.strip()
+        stage = "synth_no_act" if mode == "no_act" else "synth_act"
+        text = self.llm.complete(prompt, stage=stage).text.strip()
         if not text:
             raise RuntimeError("Synthesizer returned empty response")
         return text
@@ -1290,6 +1103,7 @@ class MSAAgent:
         revised = self._orchestrator_r31(
             draft,
             domain_r3_outputs,
+            query=state.user_query,
             allowed_owners=set(selected_agents) | {"Common"},
         )
 
@@ -1370,10 +1184,19 @@ class MSAAgent:
             "replan_history": state.replan_history,
             "current_state": state.current_state.value,
             "state_transition_history": state.state_transition_history,
+            "token_usage_by_stage": state.token_usage_by_stage,
+            "token_usage_total": state.token_usage_total,
         }
         if show_trace:
             base["messages"] = [asdict(x) for x in state.messages]
         return base
+
+    def _sync_token_usage(self, state: MSAState) -> None:
+        usage = self.llm.get_usage_snapshot()
+        state.token_usage_by_stage = usage.get("by_stage", {})
+        state.token_usage_total = usage.get(
+            "total", {"input": 0, "output": 0, "total": 0}
+        )
 
     def _load_domain_profiles(self) -> dict[str, dict[str, Any]]:
         fp = self.paths.resource_index_root / "domain_profiles.json"
@@ -1506,19 +1329,77 @@ class MSAAgent:
     ) -> None:
         event = MessageEvent(label=label, content=content, data=data)
         state.messages.append(event)
+        stage_snapshot = {}
+        if hasattr(self.llm, "get_last_stage_usage_snapshot"):
+            stage_snapshot = self.llm.get_last_stage_usage_snapshot() or {}
+        usage = stage_snapshot.get("usage", {})
+        if isinstance(usage, dict):
+            in_tok = int(usage.get("input", 0))
+            out_tok = int(usage.get("output", 0))
+            total_tok = int(usage.get("total", in_tok + out_tok))
+        else:
+            in_tok = 0
+            out_tok = 0
+            total_tok = 0
+        callback_payload = {
+            "label": label,
+            "content": content,
+            "data": data,
+            "workflow_state": state.current_state.value,
+            "stage": str(stage_snapshot.get("stage", "")).strip(),
+            "token_usage": {
+                "input": in_tok,
+                "output": out_tok,
+                "total": total_tok,
+            },
+        }
+        if self.event_callback is not None:
+            try:
+                self.event_callback(callback_payload)
+            except Exception:
+                pass
         if stream:
-            print(f"{label} {content}")
+            stage = str(stage_snapshot.get("stage", "")).strip()
+            print(
+                f"{label} {content} "
+                f"(stage: {stage or '-'}, input token: {in_tok}, output token: {out_tok}, total token: {total_tok})"
+            )
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value)
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except Exception:
+            pass
+        try:
+            f = float(text)
+        except Exception:
+            return None
+        if f.is_integer():
+            return int(f)
+        return None
 
     @staticmethod
     def _to_int_list(value: Any) -> list[int]:
         if not isinstance(value, list):
             return []
-        out = []
+        out: list[int] = []
         for item in value:
-            try:
-                out.append(int(item))
-            except Exception:
+            parsed = MSAAgent._coerce_int(item)
+            if parsed is None:
                 continue
+            out.append(parsed)
         return out
 
     @staticmethod
@@ -1531,17 +1412,14 @@ class MSAAgent:
         seen: set[int] = set()
         id_set: set[int] = set()
         for row in items:
-            try:
-                id_set.add(int(row.get("id")))
-            except Exception:
+            parsed = MSAAgent._coerce_int(row.get("id"))
+            if parsed is None:
                 continue
+            id_set.add(parsed)
         for v in selected:
             resolved: int | None = None
             if 0 <= v < len(items):
-                try:
-                    resolved = int(items[v].get("id"))
-                except Exception:
-                    resolved = None
+                resolved = MSAAgent._coerce_int(items[v].get("id"))
             elif v in id_set:
                 resolved = v
             if resolved is None or resolved in seen:
@@ -1578,9 +1456,172 @@ class MSAAgent:
             lines.append(f"{name} | {desc}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_resources_for_plan_prompt(
+        items: list[dict[str, Any]],
+        include_index: bool = True,
+        include_id: bool = False,
+        limit: int = 25,
+    ) -> str:
+        if not items:
+            return "-"
+        lines: list[str] = []
+        for i, row in enumerate(items[:limit]):
+            name = str(row.get("name", "")).strip() or "(unnamed)"
+            short = str(row.get("short_description", "")).strip()
+            full = str(row.get("description", "")).strip()
+            desc = short or full or "-"
+            prefix = f"{i}." if include_index else "-"
+            lines.append(f"{prefix} {name}")
+            lines.append(f"   - description: {desc}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_plan_optional_section(title: str, body: str) -> str:
+        body_text = str(body or "").strip()
+        if not body_text or body_text == "-":
+            return ""
+        return f"{title}:\n{body_text}"
+
+    def _build_tool_bindings(
+        self,
+        domain: str,
+        tools: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        del domain
+        rows: list[dict[str, Any]] = []
+        for tool in tools:
+            name = str(tool.get("name", "")).strip()
+            rel_path = str(tool.get("tool_file", "")).strip()
+            if not name or not rel_path:
+                continue
+            rows.append(
+                {
+                    "name": name,
+                    "short_description": str(tool.get("short_description", "")).strip(),
+                    "required_parameters": tool.get("required_parameters", []),
+                    "optional_parameters": tool.get("optional_parameters", []),
+                    "tool_file": rel_path,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _format_tool_specs_for_exec_prompt(
+        tool_bindings: list[dict[str, Any]],
+        limit: int = 80,
+    ) -> str:
+        if not tool_bindings:
+            return "-"
+        lines: list[str] = []
+        for i, row in enumerate(tool_bindings[:limit], start=1):
+            name = str(row.get("name", "")).strip()
+            desc = str(row.get("short_description", "")).strip()
+            required = row.get("required_parameters", [])
+            optional = row.get("optional_parameters", [])
+            lines.append(f"{i}. {name}")
+            lines.append(f"   - description: {desc if desc else '-'}")
+            lines.append("   - required_parameters:")
+            req_count = 0
+            if isinstance(required, list):
+                for p in required:
+                    if not isinstance(p, dict):
+                        continue
+                    pn = str(p.get("name", "")).strip()
+                    pt = str(p.get("type", "")).strip()
+                    pd = str(p.get("description", "")).strip()
+                    if not pn:
+                        continue
+                    req_count += 1
+                    lines.append(
+                        f"     - {pn} ({pt if pt else 'any'}): {pd if pd else '-'}"
+                    )
+            if req_count == 0:
+                lines.append("     - (none)")
+            lines.append("   - optional_parameters:")
+            opt_count = 0
+            if isinstance(optional, list):
+                for p in optional:
+                    if not isinstance(p, dict):
+                        continue
+                    pn = str(p.get("name", "")).strip()
+                    pt = str(p.get("type", "")).strip()
+                    pd = str(p.get("description", "")).strip()
+                    dv = p.get("default", None)
+                    if not pn:
+                        continue
+                    opt_count += 1
+                    lines.append(
+                        f"     - {pn} ({pt if pt else 'any'}, default={dv}): {pd if pd else '-'}"
+                    )
+            if opt_count == 0:
+                lines.append("     - (none)")
+            lines.append(f"   - source: {row.get('tool_file', '')}")
+            if i < min(limit, len(tool_bindings)):
+                lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_data_resources_for_exec_prompt(
+        items: list[dict[str, Any]], limit: int = 80
+    ) -> str:
+        if not items:
+            return "-"
+
+        def _clean(text: Any) -> str:
+            return " ".join(str(text or "").split()).strip()
+
+        lines: list[str] = []
+        for i, x in enumerate(items[:limit], start=1):
+            src = _clean(x.get("source_file", ""))
+            raw_name = _clean(x.get("name", ""))
+            fallback_name = Path(src).name if src else ""
+            name = raw_name or fallback_name or "(unnamed_data)"
+            desc = (
+                _clean(x.get("description", ""))
+                or _clean(x.get("short_description", ""))
+                or "-"
+            )
+            lines.append(f"{i}. {name}")
+            lines.append(f"   - description: {desc if desc else '-'}")
+            if i < min(limit, len(items)):
+                lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_library_resources_for_exec_prompt(
+        items: list[dict[str, Any]], limit: int = 80
+    ) -> str:
+        if not items:
+            return "-"
+
+        def _clean(text: Any) -> str:
+            return " ".join(str(text or "").split()).strip()
+
+        lines: list[str] = []
+        for i, x in enumerate(items[:limit], start=1):
+            src = _clean(x.get("source_file", ""))
+            raw_name = _clean(x.get("name", ""))
+            fallback_name = Path(src).name if src else ""
+            name = raw_name or fallback_name or "(unnamed_library)"
+            desc = (
+                _clean(x.get("description", ""))
+                or _clean(x.get("short_description", ""))
+                or "-"
+            )
+            lines.append(f"{i}. {name}")
+            lines.append(f"   - description: {desc if desc else '-'}")
+            if src:
+                lines.append(f"   - source: {src}")
+            if i < min(limit, len(items)):
+                lines.append("")
+        return "\n".join(lines)
+
     def _load_tool_scope(self, domain: str) -> dict[str, Any]:
         runtime_ctx = self.domain_runtime.get(domain, {})
-        tools = runtime_ctx.get("resolved", {}).get("tools", [])
+        tools = self._build_tool_bindings(
+            domain, runtime_ctx.get("resolved", {}).get("tools", [])
+        )
         scope: dict[str, Any] = {}
         loaded_modules: dict[str, Any] = {}
         failed_modules: dict[str, str] = {}
@@ -1689,6 +1730,24 @@ class MSAAgent:
         if not code:
             return False, "execute_block_empty"
         return True, code
+
+    @staticmethod
+    def _validate_exec_code_with_reason(
+        code: str,
+        allowed_tool_names: set[str] | None = None,
+        allowed_import_map: dict[str, set[str]] | None = None,
+    ) -> tuple[bool, str]:
+        del allowed_tool_names, allowed_import_map
+        src = str(code or "")
+        if re.search(r"(?m)^\s*from\s+tools\s+import\s+", src):
+            return False, "forbidden_import_from_tools"
+        if re.search(r"(?m)^\s*import\s+tools\b", src):
+            return False, "forbidden_import_tools_module"
+        if re.search(r"(?m)^\s*from\s+msa_tools(\.|\\b)", src):
+            return False, "forbidden_import_from_msa_tools"
+        if re.search(r"(?m)^\s*import\s+msa_tools(\.|\\b)?", src):
+            return False, "forbidden_import_msa_tools_module"
+        return True, "ok"
 
     @staticmethod
     def _validate_calls_json(
