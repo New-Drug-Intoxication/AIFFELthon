@@ -136,12 +136,12 @@ python biomni/eval/run_eval.py --benchmark bixbench --max-instances 2
 
 ## 실험 결과 확인
 
-기본 DB: `biomni_eval.db`
+기본 DB: `data/biomni_eval.db`
 
 ```python
 import sqlite3
 
-con = sqlite3.connect("biomni_eval.db")
+con = sqlite3.connect("data/biomni_eval.db")
 cur = con.cursor()
 for row in cur.execute(
     "SELECT experiment_id, task_name, instance_id, score, prediction, error "
