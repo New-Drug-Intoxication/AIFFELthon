@@ -183,7 +183,25 @@ class MSAAgent:
             )
 
         self._set_state(state, WorkflowState.S_PLAN_R21)
-        draft_plan = self._orchestrator_r21(domain_r2_outputs, state.user_query)
+        if len(selected_agents) == 1:
+            solo_domain = selected_agents[0]
+            solo_steps = domain_r2_outputs[0].get("checklist_steps", []) if domain_r2_outputs else []
+            draft_plan = []
+            for i, row in enumerate(solo_steps, start=1):
+                step_text = str(row.get("step", "")).strip()
+                if not step_text:
+                    continue
+                draft_plan.append(
+                    StepSpec(
+                        step_id=i,
+                        step=step_text,
+                        owner_agent=solo_domain,
+                        success_criteria=str(row.get("success_criteria", "done")).strip()
+                        or "done",
+                    )
+                )
+        else:
+            draft_plan = self._orchestrator_r21(domain_r2_outputs, state.user_query)
         state.draft_master_plan = draft_plan
         draft_lines = []
         for idx, step in enumerate(draft_plan, start=1):
@@ -206,7 +224,7 @@ class MSAAgent:
             state,
             "[Orchestrator R2.1 Message]",
             draft_content,
-            {"draft_master_plan": [asdict(x) for x in draft_plan]},
+            {"draft_master_plan": [asdict(x) for x in draft_plan], "skipped": len(selected_agents) == 1},
             stream,
         )
 
