@@ -1437,6 +1437,130 @@ def query_uniprot(
     # Base URL for UniProt API
     base_url = "https://rest.uniprot.org"
 
+    def _to_list_like(value: Any) -> list[Any]:
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        if value is None:
+            return []
+        return [value]
+
+    def _coerce_uniprot_params(raw_params: Any) -> dict[str, Any]:
+        if not isinstance(raw_params, dict):
+            return {}
+
+        def _split_fields(value: Any) -> list[str]:
+            values = []
+            for item in _to_list_like(value):
+                if item is None:
+                    continue
+                values.extend(str(item).split(","))
+            cleaned: list[str] = []
+            for token in values:
+                token = str(token).strip().strip(",")
+                if not token:
+                    continue
+                cleaned_token = re.sub(r"[^A-Za-z0-9_,()]", "", token)
+                for part in cleaned_token.split(","):
+                    part = part.strip()
+                    if part:
+                        cleaned.append(part)
+            return cleaned
+
+        def _normalize_query_value(value: Any) -> Any:
+            if isinstance(value, str):
+                return value.strip()
+            return value
+
+        def _sanitize_fields(value: Any) -> list[str]:
+            tokens = _split_fields(value)
+            sanitized = []
+            for token in tokens:
+                # Keep only token-like parts; remove obviously malformed field fragments.
+                normalized = re.sub(r"\s+", "", token)
+                normalized = normalized.replace("(", "").replace(")", "")
+                if not normalized:
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", normalized):
+                    continue
+                sanitized.append(normalized.lower())
+            return sanitized
+
+        # Build deterministic parameter dict.
+        params: dict[str, Any] = {}
+        normalized_fields: list[str] = []
+        for key, value in raw_params.items():
+            key_norm = str(key).strip().lower()
+            if key_norm in {"rows", "row", "page", "page_size", "pagesize", "limit", "projection", "offset", "skip"}:
+                continue
+            if key_norm in {"q", "query", "fields"}:
+                if key_norm == "fields":
+                    normalized_fields = _sanitize_fields(value)
+                elif key_norm == "query" or key_norm == "q":
+                    query_value = _normalize_query_value(value)
+                    if query_value:
+                        params["query"] = query_value
+                else:
+                    query_value = _normalize_query_value(value)
+                    if query_value:
+                        params[key_norm] = query_value
+                continue
+            normalized_value = _normalize_query_value(value)
+            if normalized_value is not None and normalized_value != "":
+                params[key_norm] = normalized_value
+
+        # UniProt search responses can be huge; enforce a strict cap.
+        capped = _coerce_int(max_results, 5)
+        capped = max(1, capped)
+        params["size"] = capped
+        if normalized_fields:
+            params["fields"] = ",".join(dict.fromkeys(normalized_fields))
+        return params
+
+    def _resolve_uniprot_endpoint(raw_endpoint: str) -> tuple[str, dict[str, Any]]:
+        if not isinstance(raw_endpoint, str):
+            return "", {}
+
+        candidate = raw_endpoint.strip()
+        if not candidate:
+            return "", {}
+
+        if candidate.startswith("/"):
+            candidate = f"{base_url}{candidate}"
+        elif not candidate.startswith("http://") and not candidate.startswith("https://"):
+            candidate = f"{base_url}/{candidate.lstrip('/')}"
+
+        parsed = urlparse(candidate)
+        if parsed.netloc and not parsed.netloc.endswith("rest.uniprot.org"):
+            return "", {}
+        parsed_path = parsed.path.lstrip("/")
+        query_params = parse_qs(parsed.query, keep_blank_values=False)
+        merged = {}
+        for k, v in query_params.items():
+            if not v:
+                continue
+            merged[k] = v[-1]
+        return parsed_path, _coerce_uniprot_params(merged)
+
+    def _extract_invalid_field_names(error_text: str) -> list[str]:
+        if not error_text:
+            return []
+        return re.findall(r"Invalid fields parameter value '([^']+)'", error_text)
+
+    def _call_uniprot(
+        endpoint_url: str,
+        request_params: dict[str, Any],
+        description_text: str,
+        *,
+        timeout: tuple[float, float],
+    ) -> dict[str, Any]:
+        return _query_rest_api(
+            endpoint=endpoint_url,
+            method="GET",
+            params=request_params,
+            description=description_text,
+            timeout=timeout,
+        )
+
     # Ensure we have either a prompt or an endpoint
     if prompt is None and endpoint is None:
         return {"error": "Either a prompt or an endpoint must be provided"}
@@ -1494,14 +1618,108 @@ def query_uniprot(
             }
     else:
         # Use provided endpoint directly
-        if endpoint.startswith("/"):
-            endpoint = f"{base_url}{endpoint}"
-        elif not endpoint.startswith("http"):
-            endpoint = f"{base_url}/{endpoint.lstrip('/')}"
+        endpoint, params = _resolve_uniprot_endpoint(endpoint)
+        if not isinstance(params, dict):
+            params = {}
         description = "Direct query to provided endpoint"
 
-    # Use the common REST API helper function
-    api_result = _query_rest_api(endpoint=endpoint, method="GET", description=description)
+    if not endpoint:
+        return {"error": "Could not resolve a valid UniProt endpoint"}
+
+    if prompt is None:
+        # `endpoint`/`params` were already resolved from direct mode.
+        pass
+    else:
+        endpoint, params = _resolve_uniprot_endpoint(endpoint)
+
+    # Keep deterministic resolved path + parameters.
+    endpoint = endpoint.lstrip("/")
+
+    # Construct request URL.
+    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        # Keep already-normalized full URLs.
+        url = endpoint
+    else:
+        if endpoint.startswith("rest.uniprot.org/"):
+            url = f"https://{endpoint}"
+        elif endpoint.startswith("/"):
+            url = f"{base_url}{endpoint}"
+        else:
+            url = f"{base_url}/{endpoint}"
+
+    timeout = _get_tool_timeout("uniprot", fallback=DEFAULT_HTTP_TIMEOUT)
+    max_results_int = _coerce_int(max_results, 5)
+    cache_key = _build_tool_cache_key(
+        "query_uniprot",
+        endpoint=url,
+        params=params,
+        max_results=max_results_int,
+    )
+
+    cached = _tool_query_cache_get(cache_key)
+    if cached is not None:
+        return _attach_tool_cache_metadata(cached, cache_hit=True)
+
+    api_result = _call_uniprot(url, params, description, timeout=timeout)
+    used_cache_key = cache_key
+
+    # Retry once when UniProt reports invalid fields by removing unsupported ones.
+    if not api_result.get("success", False):
+        error_message = str(api_result.get("error", ""))
+        invalid_fields = _extract_invalid_field_names(error_message)
+        if invalid_fields:
+            valid_fields = []
+            current_fields = [f for f in str(params.get("fields", "")).split(",") if f]
+            invalid_set = {v.lower() for v in invalid_fields}
+            for field in current_fields:
+                if field.lower() not in invalid_set:
+                    valid_fields.append(field)
+            if valid_fields:
+                params["fields"] = ",".join(dict.fromkeys(valid_fields))
+            elif "fields" in params:
+                params.pop("fields")
+            used_cache_key = _build_tool_cache_key(
+                "query_uniprot",
+                endpoint=url,
+                params=params,
+                max_results=max_results_int,
+            )
+            fallback_cached = _tool_query_cache_get(used_cache_key)
+            if fallback_cached is not None:
+                return _attach_tool_cache_metadata(fallback_cached, cache_hit=True)
+            api_result = _call_uniprot(url, params, f"{description} (fields fallback)", timeout=timeout)
+
+    if not api_result.get("success", False):
+        error_message = str(api_result.get("error", ""))
+        if "timeout" in error_message.lower() or "timed out" in error_message.lower():
+            return {
+                "success": False,
+                "error": _format_timeout_error_message(
+                    "UNIPROT_TIMEOUT",
+                    error_message,
+                    api_result.get("query_info", {}),
+                ),
+                "query_info": api_result.get("query_info", {}),
+                "result_raw": api_result.get("result"),
+            }
+        return api_result
+
+    if isinstance(api_result, dict) and api_result.get("success") and "result" in api_result:
+        raw_result = api_result.get("result")
+        summary = _summarize_result_structure(raw_result, max_items=_coerce_int(max_results, 5))
+        if isinstance(summary, dict) and "result_summary" in summary:
+            api_result["result_summary"] = summary.get("result_summary", {})
+            api_result["result"] = summary.get("result", raw_result)
+            api_result["result_raw"] = raw_result
+
+    if isinstance(api_result, dict) and isinstance(api_result.get("query_info"), dict):
+        api_result["query_info"]["provider"] = "uniprot"
+        api_result["query_info"]["source"] = "query_uniprot"
+        if "size" in params:
+            api_result["query_info"]["requested_size"] = params.get("size")
+
+    api_result = _attach_tool_cache_metadata(api_result, cache_hit=False)
+    _tool_query_cache_set(used_cache_key, api_result)
 
     return api_result
 

@@ -1276,13 +1276,19 @@ class EvaluationPipeline:
                     ),
                     "patient_gene_local_kg_prediction_score": None,
                 }
-                # Prefer explicit run timeout from CLI, but apply GWAS hardening default when unset.
+                # Prefer explicit run timeout from CLI, but keep hard timeout as a ceiling.
                 task_timeout = self.instance_timeout_seconds
                 if self.instance_hard_timeout_seconds is not None and self.instance_hard_timeout_seconds > 0:
-                    if task_timeout is None or task_timeout < self.instance_hard_timeout_seconds:
+                    if task_timeout is None or task_timeout > self.instance_hard_timeout_seconds:
                         task_timeout = self.instance_hard_timeout_seconds
                 if task_timeout is None and task_name == "gwas_variant_prioritization":
                     task_timeout = self.gwas_task_instance_timeout_seconds
+                    if (
+                        self.instance_hard_timeout_seconds is not None
+                        and self.instance_hard_timeout_seconds > 0
+                        and task_timeout > self.instance_hard_timeout_seconds
+                    ):
+                        task_timeout = self.instance_hard_timeout_seconds
 
                 if task_timeout is None:
                     log, raw_response = agent.go(prompt)

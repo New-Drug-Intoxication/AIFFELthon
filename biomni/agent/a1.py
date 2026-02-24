@@ -1820,15 +1820,21 @@ Each library is listed with its description to help you understand its functiona
 
                     # Plots are now captured directly in the execution entry above
 
-                if len(result) > 10000:
+                result_text = result if isinstance(result, str) else str(result)
+                if isinstance(result, str) and "timed out" in result.lower():
+                    state["next_step"] = "end"
+
+                if isinstance(result_text, str) and len(result_text) > 10000:
                     result = (
                         "The output is too long to be added to context and was truncated to the first 10K characters.\n"
                         "For large objects, print compact summaries in the next step, for example:\n"
                         "- print(preview(df))\n"
                         "- print(summarize_df(df))\n"
                         "- print(preview(result_dict))\n\n"
-                        + result[:10000]
+                        + result_text[:10000]
                     )
+                else:
+                    result = result_text
 
                 # Store the execution result with the triggering message
                 if not hasattr(self, "_execution_results"):
