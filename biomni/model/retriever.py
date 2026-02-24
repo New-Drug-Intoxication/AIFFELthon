@@ -1,5 +1,9 @@
+import json
 import contextlib
 import re
+import os
+import time
+from datetime import datetime
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -9,7 +13,83 @@ class ToolRetriever:
     """Retrieve tools from the tool registry."""
 
     def __init__(self):
-        pass
+        self._llm_call_log_path = os.getenv("BIOMNI_LLM_CALL_LOG_PATH", "").strip() or None
+        raw_max_chars = os.getenv("BIOMNI_LLM_CALL_LOG_MAX_CHARS", "").strip()
+        try:
+            self._llm_call_log_max_chars = int(raw_max_chars) if raw_max_chars else 12000
+        except ValueError:
+            self._llm_call_log_max_chars = 12000
+        self._llm_call_logging_enabled = bool(self._llm_call_log_path)
+
+    @staticmethod
+    def _truncate_text(value: str, max_chars: int | None = None) -> str:
+        if max_chars is None or max_chars <= 0:
+            return value
+        if len(value) <= max_chars:
+            return value
+        return value[:max_chars] + f"... [truncated {len(value) - max_chars} chars]"
+
+    def _serialize_for_log(self, prompt: str, response: object | None) -> dict[str, object]:
+        usage = {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+        }
+        if isinstance(response, dict):
+            usage_block = response.get("usage") or response.get("response_metadata", {}).get("token_usage")
+            if isinstance(usage_block, dict):
+                usage["prompt_tokens"] = usage_block.get("prompt_tokens")
+                usage["completion_tokens"] = usage_block.get("completion_tokens")
+                usage["total_tokens"] = usage_block.get("total_tokens")
+        else:
+            metadata = getattr(response, "response_metadata", None)
+            if isinstance(metadata, dict):
+                token_usage = metadata.get("token_usage")
+                if isinstance(token_usage, dict):
+                    usage["prompt_tokens"] = token_usage.get("prompt_tokens")
+                    usage["completion_tokens"] = token_usage.get("completion_tokens")
+                    usage["total_tokens"] = token_usage.get("total_tokens")
+
+        payload = {
+            "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "component": "tool_retriever.prompt_based_retrieval",
+            "model": str(getattr(response, "model_name", "unknown")),
+            "prompt": self._truncate_text(prompt, self._llm_call_log_max_chars),
+            "response": self._truncate_text(str(response), self._llm_call_log_max_chars),
+            "response_type": str(type(response).__name__) if response is not None else "None",
+            "token_usage": usage,
+        }
+        return payload
+
+    def _log_llm_call(self, prompt: str, response: object | None, elapsed_sec: float, error: str | None = None) -> None:
+        if not self._llm_call_logging_enabled or not self._llm_call_log_path:
+            return
+        payload = self._serialize_for_log(prompt, response)
+        payload["elapsed_seconds"] = round(elapsed_sec, 3)
+        payload["error"] = error
+        try:
+            parent = os.path.dirname(self._llm_call_log_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(self._llm_call_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            pass
+
+    def _invoke_llm(self, llm, prompt: str):
+        start = time.perf_counter()
+        try:
+            if hasattr(llm, "invoke"):
+                response = llm.invoke([HumanMessage(content=prompt)])
+            else:
+                response = str(llm(prompt))
+            elapsed = time.perf_counter() - start
+            self._log_llm_call(prompt, response, elapsed, error=None)
+            return response
+        except Exception as e:
+            elapsed = time.perf_counter() - start
+            self._log_llm_call(prompt, None, elapsed, error=str(e))
+            raise
 
     def prompt_based_retrieval(self, query: str, resources: dict, llm=None) -> dict:
         """Use a prompt-based approach to retrieve the most relevant resources for a query.
@@ -93,13 +173,11 @@ IMPORTANT GUIDELINES:
             llm = ChatOpenAI(model="gpt-4o")
 
         # Invoke the LLM
-        if hasattr(llm, "invoke"):
-            # For LangChain-style LLMs
-            response = llm.invoke([HumanMessage(content=prompt)])
+        response = self._invoke_llm(llm, prompt)
+        if hasattr(response, "content"):
             response_content = response.content
         else:
-            # For other LLM interfaces
-            response_content = str(llm(prompt))
+            response_content = str(response)
 
         # Parse the response to extract the selected indices
         selected_indices = self._parse_llm_response(response_content)

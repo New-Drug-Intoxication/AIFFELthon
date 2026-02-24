@@ -35,7 +35,32 @@ def annotate_open_reading_frames(sequence, min_length, search_reverse=False, fil
                 - frame: Reading frame (1,2,3 for forward; -1,-2,-3 for reverse)
 
     """
-    ORF = namedtuple("ORF", ["sequence", "aa_sequence", "start", "end", "strand", "frame"])
+    class ORF(namedtuple("ORF", ["sequence", "aa_sequence", "start", "end", "strand", "frame"])):
+        """Tuple-based ORF container with dict-like helper access.
+
+        Existing workflows may use attribute access (``orf.start``), while some
+        generated code paths may call ``orf.get("start")``. This helper supports both.
+        """
+
+        __slots__ = ()
+
+        def __getitem__(self, item):  # type: ignore[override]
+            if isinstance(item, str):
+                if hasattr(self, item):
+                    return getattr(self, item)
+                raise KeyError(item)
+            return super().__getitem__(item)
+
+        def get(self, key: str, default=None):
+            if hasattr(self, key):
+                return getattr(self, key)
+            if isinstance(key, str):
+                return default
+            raise TypeError("ORF.get() expects a string key")
+
+        def to_dict(self):
+            """Return a dict view of ORF fields."""
+            return self._asdict()
 
     def find_orfs_in_frame(seq_str, frame, strand):
         """Helper function to find ORFs in a specific frame."""

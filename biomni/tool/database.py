@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import pickle
@@ -14,17 +15,152 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from biomni.llm import get_llm
 from biomni.utils import parse_hpo_obo
 
-def _coerce_float_timeout(value: object, fallback: float) -> float:
-    """Safely parse an environment value into a float timeout."""
+def _coerce_timeout_value(value: object, fallback: float) -> float:
+    """Parse a timeout value from environment or caller input.
+
+    Kept as the canonical implementation so older call sites can reuse it.
+    """
     try:
-        return float(value)  # type: ignore[arg-type]
+        parsed = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _coerce_float_timeout(value: object, fallback: float) -> float:
+    """Compatibility alias used by existing timeout call sites."""
+    return _coerce_timeout_value(value, fallback)
 
 
 DEFAULT_HTTP_CONNECT_TIMEOUT = _coerce_float_timeout(os.getenv("BIOMNI_HTTP_CONNECT_TIMEOUT", "10"), 10.0)
 DEFAULT_HTTP_READ_TIMEOUT = _coerce_float_timeout(os.getenv("BIOMNI_HTTP_READ_TIMEOUT", "90"), 90.0)
 DEFAULT_HTTP_TIMEOUT = (DEFAULT_HTTP_CONNECT_TIMEOUT, DEFAULT_HTTP_READ_TIMEOUT)
+
+_TOOL_QUERY_CACHE_MAX_ENTRIES = 128
+_TOOL_QUERY_CACHE_TTL_SECONDS = 900.0
+_TOOL_QUERY_CACHE_TTL_SECONDS = _coerce_timeout_value(os.getenv("BIOMNI_TOOL_QUERY_CACHE_TTL_SECONDS", "900"), 900.0)
+_TOOL_QUERY_CACHE: dict[tuple[Any, ...], tuple[float, float, dict[str, Any]]] = {}
+
+
+def _get_tool_query_cache_settings() -> tuple[int, float]:
+    """Read tool-level cache configuration from environment variables."""
+    default_max_entries, default_ttl = _TOOL_QUERY_CACHE_MAX_ENTRIES, _TOOL_QUERY_CACHE_TTL_SECONDS
+    try:
+        max_entries = int(os.getenv("BIOMNI_TOOL_QUERY_CACHE_MAX_ENTRIES", str(default_max_entries)))
+    except (TypeError, ValueError):
+        max_entries = default_max_entries
+
+    ttl_seconds = _coerce_float_timeout(os.getenv("BIOMNI_TOOL_QUERY_CACHE_TTL_SECONDS", str(default_ttl)), default_ttl)
+    if max_entries < 0:
+        max_entries = 0
+    if ttl_seconds < 0:
+        ttl_seconds = 0.0
+    return max_entries, ttl_seconds
+
+
+def _get_tool_timeout(tool_name: str, fallback: tuple[float, float] = DEFAULT_HTTP_TIMEOUT) -> tuple[float, float]:
+    """Resolve tool-specific timeout tuple from env vars.
+
+    Supported variables:
+    - BIOMNI_<TOOL>_CONNECT_TIMEOUT
+    - BIOMNI_<TOOL>_READ_TIMEOUT
+    """
+    normalized = tool_name.strip().lower()
+    env_connect = os.getenv(f"BIOMNI_{normalized.upper()}_CONNECT_TIMEOUT", str(DEFAULT_HTTP_CONNECT_TIMEOUT))
+    env_read = os.getenv(f"BIOMNI_{normalized.upper()}_READ_TIMEOUT", str(DEFAULT_HTTP_READ_TIMEOUT))
+
+    connect_timeout = _coerce_timeout_value(env_connect, fallback[0])
+    read_timeout = _coerce_timeout_value(env_read, fallback[1])
+
+    return connect_timeout, read_timeout
+
+
+def _query_summary_timeout_value(timeout: Any, default: float = 0.0) -> float | None:
+    """Convert timeout metadata to float seconds if available."""
+    if isinstance(timeout, (tuple, list)):
+        if len(timeout) >= 2:
+            try:
+                return float(timeout[1])
+            except (TypeError, ValueError):
+                return default
+        return float(timeout[0]) if timeout else default
+
+    try:
+        timeout_value = float(timeout)
+        return timeout_value if timeout_value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _tool_cache_key(tool_name: str, **fields: Any) -> tuple[Any, ...]:
+    return tuple([tool_name] + [_serialize_for_cache(fields[key]) for key in sorted(fields.keys())])
+
+
+def _serialize_for_cache(value: Any) -> Any:
+    """Serialize objects into deterministic, hashable cache fragments."""
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=True, default=str)
+    except Exception:
+        return str(value)
+
+
+def _make_tool_cache_key(*parts: Any) -> tuple[Any, ...]:
+    return tuple(_serialize_for_cache(part) for part in parts)
+
+
+def _tool_query_cache_get(key: tuple[Any, ...]) -> dict[str, Any] | None:
+    """Get cached tool response if present and not expired."""
+    max_entries, ttl_seconds = _get_tool_query_cache_settings()
+    if max_entries <= 0:
+        return None
+
+    entry = _TOOL_QUERY_CACHE.get(key)
+    if not entry:
+        return None
+
+    expire_at, _, cached_result = entry
+    now = time.time()
+    if ttl_seconds > 0 and now > expire_at:
+        _TOOL_QUERY_CACHE.pop(key, None)
+        return None
+    return copy.deepcopy(cached_result)
+
+
+def _tool_query_cache_set(key: tuple[Any, ...], value: dict[str, Any]) -> None:
+    """Set a cached tool response with TTL and simple oldest-first eviction."""
+    max_entries, ttl_seconds = _get_tool_query_cache_settings()
+    if max_entries <= 0:
+        return
+
+    now = time.time()
+    expire_at = now + ttl_seconds if ttl_seconds > 0 else float("inf")
+    _TOOL_QUERY_CACHE[key] = (expire_at, now, copy.deepcopy(value))
+
+    if len(_TOOL_QUERY_CACHE) > max_entries:
+        # Remove oldest entries by creation time.
+        overflow = len(_TOOL_QUERY_CACHE) - max_entries
+        items = sorted(_TOOL_QUERY_CACHE.items(), key=lambda item: item[1][1])
+        for stale_key, _ in items[:overflow]:
+            _TOOL_QUERY_CACHE.pop(stale_key, None)
+
+
+def _query_info_copy(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return copy.deepcopy(payload)
+
+
+def _attach_tool_cache_metadata(result: Any, *, cache_hit: bool) -> Any:
+    if not isinstance(result, dict):
+        return result
+
+    output = copy.deepcopy(result)
+    query_info = output.get("query_info")
+    if not isinstance(query_info, dict):
+        query_info = {}
+        output["query_info"] = query_info
+    query_info["cache_hit"] = cache_hit
+    return output
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -81,15 +217,108 @@ def _get_gwas_timeout() -> tuple[float, float]:
     BIOMNI_GWAS_CONNECT_TIMEOUT / BIOMNI_GWAS_READ_TIMEOUT override
     the defaults used by _query_rest_api.
     """
-    connect_timeout = os.getenv("BIOMNI_GWAS_CONNECT_TIMEOUT", str(DEFAULT_HTTP_CONNECT_TIMEOUT))
-    read_timeout = os.getenv("BIOMNI_GWAS_READ_TIMEOUT", str(DEFAULT_HTTP_READ_TIMEOUT))
+    return _get_tool_timeout("gwas", fallback=DEFAULT_HTTP_TIMEOUT)
 
-    try:
-        connect = float(connect_timeout)
-        read = float(read_timeout)
-        return (connect, read)
-    except ValueError:
-        return DEFAULT_HTTP_TIMEOUT
+
+def _get_monarch_timeout() -> tuple[float, float]:
+    """Get Monarch API timeout tuple from environment variables.
+
+    BIOMNI_MONARCH_CONNECT_TIMEOUT / BIOMNI_MONARCH_READ_TIMEOUT override
+    the defaults used by _query_rest_api.
+    """
+    return _get_tool_timeout("monarch", fallback=DEFAULT_HTTP_TIMEOUT)
+
+
+def _get_ensembl_timeout() -> tuple[float, float]:
+    """Get Ensembl API timeout tuple from environment variables."""
+    return _get_tool_timeout("ensembl", fallback=DEFAULT_HTTP_TIMEOUT)
+
+
+def _format_timeout_error_message(prefix: str, error_message: str, query_info: dict[str, Any] | None = None) -> str:
+    suffix = error_message.strip()
+    if not suffix:
+        suffix = "request timed out"
+
+    timeout_seconds = None
+    if isinstance(query_info, dict):
+        elapsed_ms = query_info.get("elapsed_ms")
+        if isinstance(elapsed_ms, (int, float)):
+            timeout_seconds = round(float(elapsed_ms) / 1000.0, 2)
+
+    if timeout_seconds is None:
+        return f"{prefix}: {suffix}"
+    return f"{prefix}: {suffix} (elapsed={timeout_seconds}s)"
+
+
+def _build_tool_cache_key(tool_name: str, *, endpoint: str, params: dict[str, Any], max_results: int) -> tuple[Any, ...]:
+    return _tool_cache_key(tool_name, endpoint=endpoint, params=params, max_results=max_results)
+
+
+def _summarize_result_structure(raw_result: Any, *, max_items: int = 20, max_chars: int = 7000) -> dict[str, Any]:
+    """Compact arbitrary result payloads while preserving some structure."""
+    if isinstance(raw_result, dict):
+        if not raw_result:
+            return {
+                "result_summary": {
+                    "result_type": "empty_dict",
+                    "items": 0,
+                },
+                "result": {},
+            }
+
+        output: dict[str, Any] = {}
+        for key, value in raw_result.items():
+            if isinstance(value, list):
+                summary = {
+                    "total": len(value),
+                    "returned": min(len(value), max_items),
+                    "truncated": len(value) > max_items,
+                }
+                output[key] = {
+                    "items": [_truncate_gwas_text(item, max_chars=max_chars // 4) for item in value[:max_items]],
+                    "summary": summary,
+                }
+                if summary["truncated"]:
+                    output[key]["summary"]["hint"] = "Use max_results to request fewer rows at source."
+            elif isinstance(value, (dict, str, int, float, bool)):
+                output[key] = _truncate_gwas_text(value, max_chars=max_chars // 4)
+            else:
+                output[key] = _truncate_gwas_text(value, max_chars=max_chars // 4)
+
+        return {
+            "result_summary": {
+                "result_type": "generic_summary",
+                "keys": list(raw_result.keys()),
+                "max_items": max_items,
+            },
+            "result": output,
+        }
+
+    if isinstance(raw_result, list):
+        items = raw_result
+        summary = {
+            "total": len(items),
+            "returned": min(len(items), max_items),
+            "truncated": len(items) > max_items,
+        }
+        return {
+            "result_summary": {
+                "result_type": "generic_list_summary",
+                "max_items": max_items,
+            },
+            "result": {
+                "items": [_truncate_gwas_text(item, max_chars=max_chars // 4) for item in items[:max_items]],
+                "summary": summary,
+            },
+        }
+
+    return {
+        "result_summary": {
+            "result_type": "scalar_summary",
+            "result_repr_length": len(_truncate_gwas_text(raw_result, max_chars * 2)),
+        },
+        "result": _truncate_gwas_text(raw_result, max_chars),
+    }
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -730,6 +959,122 @@ def _replace_monarch_association_category(endpoint: str, new_category: str) -> s
     return urlunparse(parsed._replace(path=new_path))
 
 
+def _build_monarch_request(endpoint: str, llm_params: dict[str, Any] | None, max_results: int) -> tuple[str, dict[str, Any]]:
+    """Normalize Monarch endpoint and enforce max-results limiting.
+
+    - Drops oversized/legacy list-size keys (`rows`, `limit`, `pageSize`, `size`, `top`).
+    - Keeps remaining query args from both endpoint and LLM payload.
+    - Ensures deterministic output-size via `limit`.
+    """
+    parsed = urlparse(endpoint)
+    query_map: dict[str, Any] = {}
+    if parsed.query:
+        for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
+            if not key:
+                continue
+            if not values:
+                continue
+            query_map[key] = values[-1]
+
+    if isinstance(llm_params, dict):
+        for key, value in llm_params.items():
+            if value is None:
+                continue
+            query_map[str(key)] = value
+
+    for key in ("rows", "row", "pageSize", "size", "top", "projection"):
+        query_map.pop(key, None)
+
+    normalized_limit = _coerce_int(max_results, 2)
+    normalized_limit = max(1, normalized_limit)
+    query_map["limit"] = normalized_limit
+
+    normalized_endpoint = urlunparse(parsed._replace(query=""))
+    return normalized_endpoint, query_map
+
+
+def _summarize_monarch_result(
+    raw_result: Any,
+    *,
+    max_items: int = 20,
+    max_chars: int = 7000,
+) -> dict[str, Any]:
+    """Compact Monarch payload while preserving top-level metadata and list summaries."""
+    max_items = max(1, min(_coerce_int(max_items, 20), 100))
+    if not isinstance(raw_result, dict):
+        return {
+            "result_summary": {
+                "result_type": "monarch_scalar_summary",
+                "items": 1,
+                "truncated": False,
+                "error": "non_dict_result",
+            },
+            "value": _truncate_gwas_text(raw_result, max_chars),
+        }
+
+    embedded_results = raw_result.get("_embedded")
+    if isinstance(embedded_results, dict) and isinstance(embedded_results.get("results"), list):
+        embedded_summary = embedded_results["results"]
+        truncated_embedded = len(embedded_summary) > max_items
+        embedded_preview = [
+            _truncate_gwas_text(item, max_chars=max_chars // 4)
+            for item in embedded_summary[:max_items]
+        ]
+    else:
+        embedded_summary = None
+        embedded_preview = []
+        truncated_embedded = False
+
+    summary: dict[str, Any] = {
+        "result_type": "monarch_summary",
+        "result_keys": list(raw_result.keys()),
+        "max_items": max_items,
+        "has_payload": bool(raw_result),
+    }
+
+    output: dict[str, Any] = {
+        "_links": raw_result.get("_links") if isinstance(raw_result.get("_links"), dict) else {},
+        "result_summary": summary,
+    }
+
+    if embedded_summary is not None:
+        results_summary = {
+            "items": embedded_preview,
+            "summary": {
+                "total": len(embedded_summary),
+                "returned": len(embedded_preview),
+                "truncated": truncated_embedded,
+            },
+        }
+        if truncated_embedded:
+            results_summary["summary"]["hint"] = "Use max_results to request fewer rows at source."
+        output["results"] = results_summary
+
+    for key, value in raw_result.items():
+        if key in {"_links", "_embedded"}:
+            continue
+        if isinstance(value, list):
+            truncated = len(value) > max_items
+            preview = [
+                _truncate_gwas_text(item, max_chars=max_chars // 4)
+                for item in value[:max_items]
+            ]
+            output[key] = {
+                "items": preview,
+                "summary": {
+                    "total": len(value),
+                    "returned": len(preview),
+                    "truncated": truncated,
+                },
+            }
+            if truncated:
+                output[key]["summary"]["hint"] = "Use max_results to request fewer rows at source."
+        else:
+            output[key] = _truncate_gwas_text(value, max_chars=max_chars // 4)
+
+    return output
+
+
 def _normalize_monarch_association_category(endpoint: str) -> tuple[str, str | None, str | None]:
     """Normalize legacy association categories to current Monarch-supported values."""
     original = _extract_monarch_association_category(endpoint)
@@ -756,7 +1101,38 @@ def _is_monarch_category_validation_error(api_result: dict[str, Any]) -> bool:
     return "Input should be" in detail_text or '"type":"enum"' in detail_text or "GeneToDiseaseAssociation" in detail_text
 
 
-def _retry_monarch_with_compatible_category(endpoint: str, description: str, api_result: dict[str, Any]) -> dict[str, Any]:
+def _is_monarch_timeout_error(api_result: dict[str, Any]) -> bool:
+    if not isinstance(api_result, dict):
+        return False
+    error_text = str(api_result.get("error", "")).lower()
+    return "timed out" in error_text or "timeout" in error_text
+
+
+def _query_monarch_with_timeout(
+    endpoint: str,
+    description: str,
+    params: dict[str, Any],
+    timeout: tuple[float, float],
+) -> dict[str, Any]:
+    try:
+        return _query_rest_api(
+            endpoint=endpoint,
+            method="GET",
+            params=params,
+            description=description,
+            timeout=timeout,
+        )
+    except TypeError:
+        return _query_rest_api(endpoint=endpoint, method="GET", params=params, description=description)
+
+
+def _retry_monarch_with_compatible_category(
+    endpoint: str,
+    description: str,
+    api_result: dict[str, Any],
+    timeout: tuple[float, float],
+    params: dict[str, Any],
+) -> dict[str, Any]:
     """Retry Monarch call with a compatible category when a 422 enum error is detected."""
     current_category = _extract_monarch_association_category(endpoint)
     if not current_category:
@@ -773,7 +1149,12 @@ def _retry_monarch_with_compatible_category(endpoint: str, description: str, api
 
     retry_endpoint = _replace_monarch_association_category(endpoint, mapped_category)
     retry_description = f"{description} (compat retry: {current_category} -> {mapped_category})"
-    retry_result = _query_rest_api(endpoint=retry_endpoint, method="GET", description=retry_description)
+    retry_result = _query_monarch_with_timeout(
+        endpoint=retry_endpoint,
+        description=retry_description,
+        params=params,
+        timeout=timeout,
+    )
 
     if retry_result.get("success"):
         return retry_result
@@ -2880,6 +3261,21 @@ def query_ensembl(
     # Construct the URL
     url = f"{base_url}/{endpoint}"
 
+    max_results = _coerce_int(query_info.get("max_results", 10), 10) if "query_info" in locals() else 10
+
+    cache_key = _build_tool_cache_key(
+        "query_ensembl",
+        endpoint=url,
+        params=params,
+        max_results=max_results,
+    )
+
+    cached = _tool_query_cache_get(cache_key)
+    if cached is not None:
+        return _attach_tool_cache_metadata(cached, cache_hit=True)
+
+    timeout = _get_ensembl_timeout()
+
     # Execute the Ensembl API request using the helper function
     api_result = _query_rest_api(
         endpoint=url,
@@ -2887,13 +3283,54 @@ def query_ensembl(
         params=params,
         headers=headers,
         description=description,
+        timeout=timeout,
     )
+
+    if not api_result.get("success", False):
+        error_message = str(api_result.get("error", ""))
+        if "timeout" in error_message.lower() or "timed out" in error_message.lower():
+            return {
+                "success": False,
+                "error": _format_timeout_error_message(
+                    "ENSEMBL_TIMEOUT",
+                    error_message,
+                    api_result.get("query_info", {}),
+                ),
+                "query_info": api_result.get("query_info", {}),
+                "result_raw": api_result.get("result"),
+            }
+        return api_result
 
     # Format the results if successful
     if not verbose and "success" in api_result and api_result["success"] and "result" in api_result:
-        return _format_query_results(api_result["result"])
+        summarized = _summarize_result_structure(
+            api_result["result"],
+            max_items=max_results,
+        )
+        result = {
+            "success": True,
+            "query_info": api_result.get("query_info", {}),
+            "result": summarized["result"],
+            "result_summary": summarized["result_summary"],
+            "result_raw": api_result.get("result"),
+        }
+        result = _attach_tool_cache_metadata(result, cache_hit=False)
+        _tool_query_cache_set(cache_key, result)
+        return result
 
-    return api_result
+    result = {
+        "success": api_result.get("success", False),
+        "query_info": api_result.get("query_info", {}),
+        "result": api_result.get("result"),
+        "result_raw": api_result.get("result"),
+    }
+    if not result["success"]:
+        result["error"] = api_result.get("error")
+        result["response_text"] = api_result.get("response_text", "")
+
+    result = _attach_tool_cache_metadata(result, cache_hit=False)
+    _tool_query_cache_set(cache_key, result)
+    return result
 
 
 def query_opentarget(
@@ -3100,21 +3537,84 @@ def query_monarch(
     if normalized_category:
         description = f"{description} (category normalized: {original_category} -> {normalized_category})"
 
-    # Add max_results as a query parameter if not already present
-    if "?" in endpoint:
-        if "rows=" not in endpoint and "limit=" not in endpoint:
-            endpoint += f"&limit={max_results}"
-    else:
-        endpoint += f"?limit={max_results}"
+    query_params = {}
+    if prompt:
+        try:
+            query_params = query_info.get("params", {})  # type: ignore[name-defined]
+            if not isinstance(query_params, dict):
+                query_params = {}
+        except Exception:
+            query_params = {}
 
-    api_result = _query_rest_api(endpoint=endpoint, method="GET", description=description)
+    # Force deterministic max-results handling in all request paths.
+    endpoint, params = _build_monarch_request(
+        endpoint=endpoint,
+        llm_params=query_params,
+        max_results=max_results,
+    )
+
+    timeout = _get_tool_timeout("monarch")
+
+    cache_key = _build_tool_cache_key(
+        "query_monarch",
+        endpoint=endpoint,
+        params=params,
+        max_results=_coerce_int(max_results, 2),
+    )
+
+    cached = _tool_query_cache_get(cache_key)
+    if cached is not None:
+        return _attach_tool_cache_metadata(cached, cache_hit=True)
+
+    api_result = _query_monarch_with_timeout(
+        endpoint=endpoint,
+        description=description,
+        params=params,
+        timeout=timeout,
+    )
+
     if _is_monarch_category_validation_error(api_result):
-        api_result = _retry_monarch_with_compatible_category(endpoint=endpoint, description=description, api_result=api_result)
+        api_result = _retry_monarch_with_compatible_category(
+            endpoint=endpoint,
+            description=description,
+            api_result=api_result,
+            timeout=timeout,
+            params=params,
+        )
+
+    if _is_monarch_timeout_error(api_result):
+        return {
+            "success": False,
+            "error": _format_timeout_error_message(
+                "MONARCH_TIMEOUT",
+                str(api_result.get("error", "Monarch request timed out")),
+                api_result.get("query_info", {}),
+            ),
+            "query_info": api_result.get("query_info", {}),
+            "result_raw": api_result.get("result"),
+        }
 
     if not verbose and "success" in api_result and api_result["success"] and "result" in api_result:
-        return _format_query_results(api_result["result"])
+        result = {
+            "success": True,
+            "query_info": api_result.get("query_info", {}),
+            "result": _summarize_monarch_result(
+                api_result["result"],
+                max_items=_coerce_int(max_results, 20),
+            ),
+            "result_raw": api_result["result"],
+        }
+        result = _attach_tool_cache_metadata(result, cache_hit=False)
+        _tool_query_cache_set(cache_key, result)
+        return result
 
-    return api_result
+    if isinstance(api_result, dict) and api_result.get("success"):
+        api_result["result_raw"] = api_result.get("result")
+        api_result = _attach_tool_cache_metadata(api_result, cache_hit=False)
+        _tool_query_cache_set(cache_key, api_result)
+        return api_result
+
+    return _attach_tool_cache_metadata(api_result, cache_hit=False)
 
 
 # OpenFDA integration
@@ -3357,7 +3857,17 @@ def query_gwas_catalog(
     if not isinstance(params, dict):
         params = {}
     params = _clamp_gwas_params(params, max_results)
-    query_timeout = _get_gwas_timeout()
+    query_timeout = _get_tool_timeout("gwas", fallback=DEFAULT_HTTP_TIMEOUT)
+    cache_key = _build_tool_cache_key(
+        "query_gwas_catalog",
+        endpoint=endpoint,
+        params=params,
+        max_results=max_results,
+    )
+
+    cached = _tool_query_cache_get(cache_key)
+    if cached is not None:
+        return _attach_tool_cache_metadata(cached, cache_hit=True)
 
     # Execute the GWAS Catalog API request using the helper function
     api_result = _query_rest_api(
@@ -3367,6 +3877,21 @@ def query_gwas_catalog(
         description=description,
         timeout=query_timeout,
     )
+    if not api_result.get("success", False):
+        error_message = str(api_result.get("error", ""))
+        if "timeout" in error_message.lower() or "timed out" in error_message.lower():
+            return {
+                "success": False,
+                "error": _format_timeout_error_message(
+                    "GWAS_TIMEOUT",
+                    error_message,
+                    api_result.get("query_info", {}),
+                ),
+                "query_info": api_result.get("query_info", {}),
+                "result_raw": api_result.get("result"),
+            }
+        return api_result
+
     if isinstance(api_result, dict) and isinstance(api_result.get("query_info"), dict):
         api_result["query_info"]["llm"] = llm_query_info
 
@@ -3380,6 +3905,9 @@ def query_gwas_catalog(
             api_result["result"] = summary
         else:
             api_result["result"] = summary
+
+    api_result = _attach_tool_cache_metadata(api_result, cache_hit=False)
+    _tool_query_cache_set(cache_key, api_result)
 
     return api_result
 

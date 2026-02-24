@@ -1,7 +1,9 @@
 import glob
+import json
 import inspect
 import os
 import re
+import time
 from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +38,7 @@ from biomni.utils import (
     parse_tool_calls_with_modules,
     pretty_print,
     read_module2api,
+    normalize_gene_info_schema,
     run_bash_script,
     run_r_code,
     run_with_timeout,
@@ -51,6 +54,7 @@ if os.path.exists(".env"):
 class AgentState(TypedDict):
     messages: list[BaseMessage]
     next_step: str | None
+    steps: int | None
 
 
 def _flatten_response_content_blocks(content: Any) -> str:
@@ -241,6 +245,28 @@ class A1:
             print("Skipping datalake download (load_datalake=False)")
             print("Note: Some tools may require datalake files to function properly.")
 
+        # Backward-compatible schema normalization for local data lake files.
+        # Older/newer versions of gene_info.parquet may use `gene_id` instead of
+        # `ensembl_gene_id`; this patch avoids KeyError in downstream REPL code.
+        try:
+            normalize_result = normalize_gene_info_schema(data_lake_dir)
+            status = normalize_result.get("status", "unknown")
+            if normalize_result.get("ok"):
+                if status == "added_compat_alias":
+                    alias_from = normalize_result.get("alias_from")
+                    print(
+                        "Normalized gene_info.parquet schema: added ensembl_gene_id alias "
+                        f"(source='{alias_from}')"
+                    )
+                elif status == "already_compatible":
+                    print("gene_info.parquet schema is already compatible (has ensembl_gene_id).")
+            else:
+                if status not in {"missing_file", "already_compatible"}:
+                    reason = normalize_result.get("error") or normalize_result.get("status")
+                    print(f"⚠️ gene_info schema normalization: {status} ({reason})")
+        except Exception as e:
+            print(f"⚠️ gene_info schema normalization failed: {e}")
+
         self.path = os.path.join(path, "biomni_data")
         module2api = read_module2api()
 
@@ -254,6 +280,17 @@ class A1:
         )
         self.module2api = module2api
         self.use_tool_retriever = use_tool_retriever
+
+        # Local LLM call logging for prompt/response debugging.
+        self._llm_call_log_path = os.getenv("BIOMNI_LLM_CALL_LOG_PATH", "").strip() or None
+        raw_max_chars = os.getenv("BIOMNI_LLM_CALL_LOG_MAX_CHARS", "").strip()
+        try:
+            self._llm_call_log_max_chars = int(raw_max_chars) if raw_max_chars else 12000
+        except ValueError:
+            self._llm_call_log_max_chars = 12000
+        self._llm_call_logging_enabled = bool(self._llm_call_log_path)
+        if self._llm_call_logging_enabled:
+            print(f"🧠 LLM call logging enabled: {self._llm_call_log_path}")
 
         if self.use_tool_retriever:
             self.tool_registry = ToolRegistry(module2api)
@@ -271,7 +308,150 @@ class A1:
         # Add timeout parameter
         self.timeout_seconds = timeout_seconds  # 10 minutes default timeout
         self.tool_call_budget_per_step = self._get_tool_call_budget()
+        self.recursion_limit = self._get_recursion_limit()
         self.configure()
+
+    @staticmethod
+    def _truncate_text(value: str, max_chars: int | None = None) -> str:
+        if max_chars is None or max_chars <= 0:
+            return value
+        if len(value) <= max_chars:
+            return value
+        return value[:max_chars] + f"... [truncated {len(value) - max_chars} chars]"
+
+    @staticmethod
+    def _serialize_messages_for_log(messages: Any) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+
+        if isinstance(messages, tuple):
+            messages = list(messages)
+
+        if not isinstance(messages, list):
+            messages = [messages]
+
+        for item in messages:
+            if isinstance(item, tuple) and len(item) >= 2:
+                role = str(item[0])
+                content = item[1]
+                serialized.append({"role": role, "content": str(content)})
+                continue
+
+            role = getattr(item, "type", None)
+            if role is None:
+                role = item.__class__.__name__ if not isinstance(item, str) else "user"
+            content = getattr(item, "content", item)
+            serialized.append({"role": str(role), "content": str(content)})
+
+        return serialized
+
+    @staticmethod
+    def _extract_llm_response_content(response: Any) -> str:
+        if response is None:
+            return ""
+        if isinstance(response, str):
+            return response
+        if hasattr(response, "content"):
+            return _flatten_response_content_blocks(response.content)
+        if isinstance(response, dict):
+            # Some structured output chains return dictionaries directly.
+            try:
+                return json.dumps(response, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                return str(response)
+        if hasattr(response, "dict"):
+            try:
+                return json.dumps(response.dict(), ensure_ascii=False, default=str)
+            except Exception:
+                pass
+        return str(response)
+
+    @staticmethod
+    def _extract_llm_usage(response: Any) -> dict[str, int | None]:
+        usage = {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+        }
+
+        if response is None:
+            return usage
+
+        if isinstance(response, dict):
+            usage_value = response.get("usage") or response.get("response_metadata", {}).get("token_usage")
+            if isinstance(usage_value, dict):
+                usage["prompt_tokens"] = usage_value.get("prompt_tokens")
+                usage["completion_tokens"] = usage_value.get("completion_tokens")
+                usage["total_tokens"] = usage_value.get("total_tokens")
+            return usage
+
+        usage_source = getattr(response, "usage_metadata", None)
+        if isinstance(usage_source, dict):
+            usage["prompt_tokens"] = usage_source.get("input_tokens")
+            usage["completion_tokens"] = usage_source.get("output_tokens")
+            usage["total_tokens"] = usage_source.get("total_tokens")
+            return usage
+
+        metadata = getattr(response, "response_metadata", None)
+        if isinstance(metadata, dict):
+            token_usage = metadata.get("token_usage")
+            if isinstance(token_usage, dict):
+                usage["prompt_tokens"] = token_usage.get("prompt_tokens")
+                usage["completion_tokens"] = token_usage.get("completion_tokens")
+                usage["total_tokens"] = token_usage.get("total_tokens")
+                return usage
+
+            usage["prompt_tokens"] = metadata.get("prompt_tokens")
+            usage["completion_tokens"] = metadata.get("completion_tokens")
+            usage["total_tokens"] = metadata.get("total_tokens")
+
+        return usage
+
+    def _log_llm_call(self, component: str, prompt_messages: Any, response: Any, elapsed_sec: float, error: str | None = None) -> None:
+        if not self._llm_call_logging_enabled or not self._llm_call_log_path:
+            return
+
+        llm_model = getattr(self.llm, "model_name", None) or str(type(self.llm).__name__)
+        serialized_messages = self._serialize_messages_for_log(prompt_messages)
+        for item in serialized_messages:
+            item["content"] = self._truncate_text(item.get("content", ""), self._llm_call_log_max_chars)
+
+        response_text = self._extract_llm_response_content(response)
+        response_text = self._truncate_text(response_text, self._llm_call_log_max_chars)
+
+        payload = {
+            "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "component": component,
+            "model": str(llm_model),
+            "elapsed_seconds": round(elapsed_sec, 3),
+            "user_task": (self.user_task[:200] if isinstance(getattr(self, "user_task", None), str) else None),
+            "prompt": serialized_messages,
+            "response": response_text,
+            "response_type": str(type(response).__name__) if response is not None else "None",
+            "error": error,
+            "token_usage": self._extract_llm_usage(response),
+        }
+
+        try:
+            parent = os.path.dirname(self._llm_call_log_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(self._llm_call_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            # Keep logging failures non-fatal.
+            pass
+
+    def _invoke_llm(self, llm_obj, prompt_messages, component: str):
+        start = time.perf_counter()
+        try:
+            response = llm_obj.invoke(prompt_messages)
+            elapsed = time.perf_counter() - start
+            self._log_llm_call(component, prompt_messages, response, elapsed, error=None)
+            return response
+        except Exception as e:
+            elapsed = time.perf_counter() - start
+            self._log_llm_call(component, prompt_messages, None, elapsed, error=str(e))
+            raise
 
     @staticmethod
     def _get_tool_call_budget() -> int:
@@ -282,6 +462,16 @@ class A1:
             return budget if budget > 0 else 20
         except (TypeError, ValueError):
             return 20
+
+    @staticmethod
+    def _get_recursion_limit() -> int:
+        """Read workflow recursion cap from env with safe fallback."""
+        raw_value = os.getenv("BIOMNI_AGENT_RECURSION_LIMIT", "120")
+        try:
+            value = int(raw_value)
+            return value if value > 0 else 120
+        except (TypeError, ValueError):
+            return 120
 
     def add_tool(self, api):
         """Add a new tool to the agent's tool registry and make it available for retrieval.
@@ -1445,6 +1635,25 @@ Each library is listed with its description to help you understand its functiona
 
         # Define the nodes
         def generate(state: AgentState) -> AgentState:
+            step_limit = getattr(self, "_task_max_steps", None)
+            try:
+                current_step = int(state.get("steps") or 0) + 1
+            except (TypeError, ValueError):
+                current_step = 1
+            state["steps"] = current_step
+
+            if isinstance(step_limit, int) and step_limit > 0 and current_step > step_limit:
+                state["messages"].append(
+                    AIMessage(
+                        content=(
+                            f"Tool and loop budget exceeded for this task. "
+                            f"Terminating after {current_step - 1} steps (max {step_limit})."
+                        )
+                    )
+                )
+                state["next_step"] = "end"
+                return state
+
             # Add OpenAI-specific formatting reminders if using OpenAI models
             system_prompt = self.system_prompt
             if hasattr(self.llm, "model_name") and (
@@ -1453,7 +1662,7 @@ Each library is listed with its description to help you understand its functiona
                 system_prompt += "\n\nIMPORTANT FOR GPT MODELS: You MUST use XML tags <execute> or <solution> in EVERY response. Do not use markdown code blocks (```) - use <execute> tags instead."
 
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
-            response = self.llm.invoke(messages)
+            response = self._invoke_llm(self.llm, messages, component="a1.generate")
 
             # Normalize content blocks from different model providers into plain text.
             msg = _flatten_response_content_blocks(response.content)
@@ -1549,8 +1758,30 @@ Each library is listed with its description to help you understand its functiona
                     state["next_step"] = "generate"
                     return state
 
-                # Set timeout duration (10 minutes = 600 seconds)
+                # Enforce optional task-level cumulative tool-call budget.
+                task_tool_call_limit = getattr(self, "_task_tool_call_limit", None)
+                if isinstance(task_tool_call_limit, int) and task_tool_call_limit > 0:
+                    task_tool_call_count = int(getattr(self, "_task_tool_call_count", 0))
+                    task_tool_call_count += len(tool_calls)
+                    self._task_tool_call_count = task_tool_call_count
+                    if task_tool_call_count > task_tool_call_limit:
+                        warning_message = (
+                            "ERROR: Task-level tool call budget exceeded. "
+                            f"Observed {task_tool_call_count}/{task_tool_call_limit} tool calls."
+                        )
+                        state["messages"].append(
+                            AIMessage(
+                                content=warning_message
+                            )
+                        )
+                        state["next_step"] = "generate"
+                        return state
+
+                # Set timeout duration (10 minutes default = 600 seconds)
                 timeout = self.timeout_seconds
+                task_step_timeout = getattr(self, "_task_step_timeout_seconds", None)
+                if isinstance(task_step_timeout, int) and task_step_timeout > 0:
+                    timeout = task_step_timeout
 
                 # Check if the code is R code
                 if (
@@ -1663,7 +1894,11 @@ Each library is listed with its description to help you understand its functiona
                 Think hard what are missing to solve the task.
                 No question asked, just feedbacks.
                 """
-                feedback = self.llm.invoke(messages + [HumanMessage(content=feedback_prompt)])
+                feedback = self._invoke_llm(
+                    self.llm,
+                    messages + [HumanMessage(content=feedback_prompt)],
+                    component="a1.self_critic",
+                )
 
                 # Add feedback as a new message
                 state["messages"].append(
@@ -1845,8 +2080,16 @@ Each library is listed with its description to help you understand its functiona
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
             self.update_system_prompt_with_selected_resources(selected_resources_names)
 
-        inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
-        config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
+        inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None, "steps": 0}
+        recursion_limit = self.recursion_limit
+        task_recursion_limit = getattr(self, "_task_recursion_limit", None)
+        if isinstance(task_recursion_limit, int) and task_recursion_limit > 0:
+            recursion_limit = task_recursion_limit
+
+        config = {
+            "recursion_limit": recursion_limit,
+            "configurable": {"thread_id": 42},
+        }
         self.log = []
 
         # Store the final conversation state for markdown generation
@@ -1882,8 +2125,16 @@ Each library is listed with its description to help you understand its functiona
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
             self.update_system_prompt_with_selected_resources(selected_resources_names)
 
-        inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
-        config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
+        inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None, "steps": 0}
+        recursion_limit = self.recursion_limit
+        task_recursion_limit = getattr(self, "_task_recursion_limit", None)
+        if isinstance(task_recursion_limit, int) and task_recursion_limit > 0:
+            recursion_limit = task_recursion_limit
+
+        config = {
+            "recursion_limit": recursion_limit,
+            "configurable": {"thread_id": 42},
+        }
         self.log = []
 
         # Store the final conversation state for markdown generation
@@ -2031,7 +2282,10 @@ Each library is listed with its description to help you understand its functiona
         )
 
         checker_llm = self.format_check_prompt | self.llm.with_structured_output(output_class)
-        result = checker_llm.invoke({"messages": [("user", str(self.log))]}).dict()
+        checker_input = {"messages": [("user", str(self.log))]}
+        result = self._invoke_llm(checker_llm, checker_input, component="a1.result_formatting")
+        if hasattr(result, "dict"):
+            result = result.dict()
         return result
 
     def _parse_tool_calls_from_code(self, code: str) -> list[str]:
@@ -2770,9 +3024,17 @@ Each library is listed with its description to help you understand its functiona
 
             agent_messages.append(HumanMessage(content=text_input))
 
-            # Prepare inputs for the agent
-            inputs = {"messages": agent_messages, "next_step": None}
-            config = {"recursion_limit": 500, "configurable": {"thread_id": thread_id}}
+            # Prepare inputs for the agent with explicit step tracking.
+            # This keeps Gradio path aligned with go()/go_stream() execution settings.
+            inputs = {"messages": agent_messages, "next_step": None, "steps": 0}
+            recursion_limit = self.recursion_limit
+            task_recursion_limit = getattr(self, "_task_recursion_limit", None)
+            if isinstance(task_recursion_limit, int) and task_recursion_limit > 0:
+                recursion_limit = task_recursion_limit
+            config = {
+                "recursion_limit": recursion_limit,
+                "configurable": {"thread_id": thread_id},
+            }
 
             # Stream the agent's responses
             t = time()

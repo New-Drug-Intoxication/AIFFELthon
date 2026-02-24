@@ -1,6 +1,10 @@
 import re
+import os
 import time
 import traceback
+import json
+import pandas as pd
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
@@ -9,6 +13,55 @@ from biomni.eval.benchmark import Benchmark
 from biomni.eval.logger import BaseLogger
 from biomni.utils import run_with_timeout
 from biomni.tool.support_tools import reset_python_repl_namespace
+from biomni.config import default_config
+
+
+try:
+    import tiktoken
+except Exception:  # pragma: no cover - optional dependency fallback
+    tiktoken = None
+
+
+def _coerce_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _coerce_env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _coerce_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _normalize_gene_token(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _relation_score(relation_text: str) -> int:
+    text = str(relation_text or "").lower()
+    if "causal" in text or "causative" in text or "causes" in text or "caused" in text:
+        return 3
+    if "involved" in text or "modulates" in text or "regulates" in text:
+        return 2
+    if "associated" in text or "association" in text or "correlate" in text:
+        return 1
+    return 0
 
 
 def _flatten_content_blocks(value: Any) -> str:
@@ -40,11 +93,84 @@ def _extract_solution_text(text: str) -> str:
     return match.group(1).strip()
 
 
+def _extract_answer_tags(text: str) -> list[str]:
+    return [match.group(1).upper() for match in re.finditer(r"\[ANSWER\]\s*([A-Za-z])\s*\[/ANSWER\]", text, re.IGNORECASE)]
+
+
 def _extract_answer_tag(text: str) -> str | None:
-    match = re.search(r"\[ANSWER\]\s*([A-Za-z])\s*\[/ANSWER\]", text, re.IGNORECASE)
-    if not match:
-        return None
-    return match.group(1).upper()
+    tags = _extract_answer_tags(text)
+    if tags:
+        return tags[-1]
+    return None
+
+
+def _extract_lab_bench_option_letters(prompt: str) -> list[str]:
+    letters: list[str] = []
+    for value in re.findall(r"(?im)^\s*([A-Za-z])\s*[\)\.]\s+", prompt):
+        letter = value.upper()
+        if letter not in letters:
+            letters.append(letter)
+
+    # Patterns like: "1) Option A" / "1. A"
+    for value in re.findall(r"(?im)^\s*\d+\)\s*(?:[Oo]ption\s+)?([A-Za-z])\s*(?:[\)\.]?\s*$|\s+)", prompt):
+        letter = value.upper()
+        if letter not in letters:
+            letters.append(letter)
+
+    # Patterns like: "1) Answer A" with trailing text
+    for value in re.findall(r"(?im)^\s*\d+\)\s*[^A-Za-z]*([A-Za-z])\s*[,\)]?\s*$", prompt):
+        letter = value.upper()
+        if letter not in letters:
+            letters.append(letter)
+
+    if not letters:
+        return []
+
+    max_letter = max(letters)
+    return [chr(v) for v in range(ord("A"), ord(max_letter) + 1)]
+
+
+def _coerce_structured_text_value(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    if not ((stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]"))):
+        return text.strip()
+
+    parsed = None
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return text.strip()
+
+    if isinstance(parsed, list):
+        if not parsed:
+            return ""
+        first = parsed[0]
+        if isinstance(first, str):
+            return first.strip()
+        return str(first).strip()
+
+    if isinstance(parsed, dict):
+        for key in ("causal_gene", "answer", "result", "value"):
+            value = parsed.get(key)
+            if value:
+                if isinstance(value, str):
+                    return value.strip()
+                if isinstance(value, list) and value:
+                    list_value = value[0]
+                    return str(list_value).strip()
+                return str(value).strip()
+        first_value = next(iter(parsed.values()), None)
+        if first_value is not None:
+            if isinstance(first_value, str):
+                return first_value.strip()
+            if isinstance(first_value, list) and first_value:
+                first_item = first_value[0]
+                return str(first_item).strip()
+            return str(first_value).strip()
+
+    return text.strip()
 
 
 def _extract_candidate_variants(prompt: str) -> list[str]:
@@ -86,6 +212,56 @@ def _extract_candidate_genes(prompt: str) -> list[str]:
     return dedup
 
 
+def _extract_patient_task_tokens(prompt: str) -> tuple[list[str], list[str]]:
+    candidates = _extract_candidate_genes(prompt)
+
+    phenotypes: list[str] = []
+    phenotype_lines = []
+    phenotype_patterns = [
+        r"(?im)^\s*(?:clinical features|clinical feature|phenotypes?|phenotype|disease|clinical findings|hpo ids?)\s*[:：]\s*(.+)$",
+        r"(?im)^\s*(?:patient presents with|has phenotype\s*[:：])\s*(.+)$",
+    ]
+
+    for pattern in phenotype_patterns:
+        phenotype_lines.extend(re.findall(pattern, prompt))
+
+    for line in phenotype_lines:
+        parts = re.split(r"[,;\n]", line)
+        for part in parts:
+            token = part.strip().strip("{}[]()")
+            if not token:
+                continue
+            # Keep HPO style tokens (HP:123456) as-is and strip trailing punctuation.
+            token = re.sub(r"[\.\;\)\]]+$", "", token).strip()
+            if token:
+                phenotypes.append(token)
+
+    hpo_ids = re.findall(r"\bHP:?[:]?\d{7}\b", prompt, flags=re.IGNORECASE)
+    for hpo in hpo_ids:
+        if hpo not in phenotypes:
+            phenotypes.append(hpo)
+
+    dedup_candidates: list[str] = []
+    seen_candidates: set[str] = set()
+    for value in candidates:
+        key = value.upper()
+        if key in seen_candidates:
+            continue
+        seen_candidates.add(key)
+        dedup_candidates.append(value)
+
+    dedup_phenotypes: list[str] = []
+    seen_phenotypes: set[str] = set()
+    for value in phenotypes:
+        key = _normalize_gene_token(value)
+        if not key or key in seen_phenotypes:
+            continue
+        seen_phenotypes.add(key)
+        dedup_phenotypes.append(value.strip())
+
+    return dedup_candidates[:200], dedup_phenotypes[:200]
+
+
 def _contains_token(text: str, token: str) -> bool:
     pattern = rf"(?<![A-Za-z0-9_.-]){re.escape(token)}(?![A-Za-z0-9_.-])"
     if re.search(pattern, text, flags=re.IGNORECASE):
@@ -93,26 +269,207 @@ def _contains_token(text: str, token: str) -> bool:
     return token.lower() in text.lower()
 
 
-def _canonicalize_letter_answer(task_name: str, text: str) -> str:
-    answer_tag = _extract_answer_tag(text)
-    if answer_tag:
-        return answer_tag
+def _to_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _estimate_tokens(text: str, model_name: str | None = None) -> int:
+    """
+    Estimate token count for a text segment.
+
+    Uses tiktoken when available (best effort), otherwise word-count fallback.
+    """
+    if not text:
+        return 0
+
+    if tiktoken is not None:
+        encoding_name = "cl100k_base"
+        model = (model_name or "").lower()
+        if "gpt-4" in model or "gpt-3.5" in model:
+            encoding_name = "cl100k_base"
+        elif "gpt-4o" in model:
+            encoding_name = "o200k_base"
+        try:
+            encoding = tiktoken.get_encoding(encoding_name)
+            return len(encoding.encode(text))
+        except Exception:
+            # Fallback to a conservative approximation
+            return max(1, len(re.findall(r"\S+", text)))
+
+    # Fallback: rough approximation when tokenizer is unavailable.
+    return max(1, len(re.findall(r"\S+", text)))
+
+
+def _extract_message_token_usage(message: Any) -> dict[str, int]:
+    """Try to extract token usage fields from one LLM message object."""
+    usage = getattr(message, "usage_metadata", None)
+    if isinstance(usage, dict):
+        prompt_tokens = _to_int(usage.get("input_tokens"))
+        completion_tokens = _to_int(usage.get("output_tokens"))
+        total_tokens = _to_int(usage.get("total_tokens"))
+        if prompt_tokens is not None or completion_tokens is not None or total_tokens is not None:
+            return {
+                "prompt_tokens": prompt_tokens or 0,
+                "completion_tokens": completion_tokens or 0,
+                "total_tokens": total_tokens or 0,
+            }
+
+    metadata = getattr(message, "response_metadata", None)
+    if isinstance(metadata, dict):
+        token_usage = metadata.get("token_usage")
+        if isinstance(token_usage, dict):
+            prompt_tokens = _to_int(token_usage.get("prompt_tokens"))
+            completion_tokens = _to_int(token_usage.get("completion_tokens"))
+            total_tokens = _to_int(token_usage.get("total_tokens"))
+            if prompt_tokens is not None or completion_tokens is not None or total_tokens is not None:
+                return {
+                    "prompt_tokens": prompt_tokens or 0,
+                    "completion_tokens": completion_tokens or 0,
+                    "total_tokens": total_tokens or 0,
+                }
+
+        prompt_tokens = _to_int(metadata.get("prompt_tokens"))
+        completion_tokens = _to_int(metadata.get("completion_tokens"))
+        total_tokens = _to_int(metadata.get("total_tokens"))
+        if prompt_tokens is not None or completion_tokens is not None or total_tokens is not None:
+            return {
+                "prompt_tokens": prompt_tokens or 0,
+                "completion_tokens": completion_tokens or 0,
+                "total_tokens": total_tokens or 0,
+            }
+
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def _compute_step_token_usage(agent: Any, prompt: str, model_name: str | None = None) -> dict[str, Any]:
+    """Compute approximate token usage per agent step and aggregate totals."""
+    state = getattr(agent, "_conversation_state", None)
+    if not isinstance(state, dict):
+        state = {}
+    messages = state.get("messages", [])
+    if not isinstance(messages, list):
+        messages = []
+
+    steps: list[dict[str, Any]] = []
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_tokens = 0
+    previous_human = prompt
+    step_no = 0
+
+    for message in messages:
+        # Human turns are treated as prompt contexts for following AI turns.
+        if hasattr(message, "content") and message.__class__.__name__ == "HumanMessage":
+            previous_human = "" if message.content is None else str(message.content)
+            continue
+
+        if not hasattr(message, "content"):
+            continue
+
+        # Count only AI outputs as LLM steps.
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        if not isinstance(message, AIMessage):
+            continue
+
+        message_content = str(message.content or "")
+        step_no += 1
+        usage = _extract_message_token_usage(message)
+        has_explicit_usage = usage["total_tokens"] > 0 or usage["prompt_tokens"] > 0 or usage["completion_tokens"] > 0
+
+        if has_explicit_usage:
+            prompt_tokens = usage["prompt_tokens"]
+            completion_tokens = usage["completion_tokens"]
+            total_step_tokens = usage["total_tokens"] or (prompt_tokens + completion_tokens)
+        else:
+            # Fallback: best-effort token estimate
+            prompt_tokens = _estimate_tokens(previous_human, model_name=model_name)
+            completion_tokens = _estimate_tokens(message_content, model_name=model_name)
+            total_step_tokens = prompt_tokens + completion_tokens
+
+        steps.append(
+            {
+                "step": step_no,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_step_tokens,
+            }
+        )
+        total_prompt_tokens += prompt_tokens
+        total_completion_tokens += completion_tokens
+        total_tokens += total_step_tokens
+
+        previous_human = ""
+
+    return {
+        "steps": steps,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+        "total_tokens": total_tokens,
+        "step_count": len(steps),
+    }
+
+
+def _canonicalize_letter_answer(task_name: str, text: str, valid_options: list[str] | None = None) -> str:
+    answer_tags = _extract_answer_tags(text)
+    if answer_tags:
+        last_answer_tag = answer_tags[-1]
+        if not valid_options or last_answer_tag in valid_options:
+            return last_answer_tag
+        if valid_options:
+            print(
+                f"Invalid option '{last_answer_tag}' extracted, valid range: "
+                f"{valid_options[0]}-{valid_options[-1]}"
+            )
 
     stripped = text.strip()
     if len(stripped) == 1 and stripped.isalpha():
-        return stripped.upper()
+        letter = stripped.upper()
+        if not valid_options:
+            return letter
+        if letter in valid_options:
+            return letter
+        print(f"Invalid option '{letter}' extracted, valid range: {valid_options[0]}-{valid_options[-1]}")
+        return ""
 
     lines = [line.strip() for line in stripped.splitlines() if line.strip()]
     for line in reversed(lines):
         if len(line) <= 6:
             match = re.fullmatch(r"[\[\(\{]?\s*([A-Za-z])\s*[\]\)\}]?", line)
             if match:
-                return match.group(1).upper()
+                letter = match.group(1).upper()
+                if not valid_options:
+                    return letter
+                if letter in valid_options:
+                    return letter
+                print(
+                    f"Invalid option '{letter}' extracted, valid range: "
+                    f"{valid_options[0]}-{valid_options[-1]}"
+                )
+                continue
 
     pattern = r"\b([A-Fa-f])\b" if task_name == "crispr_delivery" else r"\b([A-Za-z])\b"
     match = re.search(pattern, stripped)
     if match:
-        return match.group(1).upper()
+        letter = match.group(1).upper()
+        if not valid_options:
+            return letter
+        if letter in valid_options:
+            return letter
+        print(f"Invalid option '{letter}' extracted, valid range: {valid_options[0]}-{valid_options[-1]}")
+        return ""
+
+    if answer_tags:
+        for tag in reversed(answer_tags):
+            if not valid_options or tag in valid_options:
+                return tag
 
     return stripped
 
@@ -120,33 +477,49 @@ def _canonicalize_letter_answer(task_name: str, text: str) -> str:
 def _canonicalize_variant_answer(text: str, prompt: str) -> str:
     prompt_candidates = _extract_candidate_variants(prompt)
     prompt_map = {item.lower(): item for item in prompt_candidates}
-    text_candidates = re.findall(r"\brs\d+\b", text, flags=re.IGNORECASE)
+    structured_text = _coerce_structured_text_value(text)
+    text_candidates = re.findall(r"\brs\d+\b", structured_text, flags=re.IGNORECASE)
 
-    for item in text_candidates:
-        if item.lower() in prompt_map:
-            return prompt_map[item.lower()]
+    if text_candidates:
+        return text_candidates[-1]
 
     if prompt_candidates:
         for candidate in prompt_candidates:
             if re.search(rf"\b{re.escape(candidate)}\b", text, flags=re.IGNORECASE):
                 return candidate
 
-    if text_candidates:
-        return text_candidates[0]
+    return structured_text if structured_text else text.strip()
 
-    return text.strip()
+
+def _canonicalize_rare_disease_answer(text: str) -> str:
+    structured_text = _coerce_structured_text_value(text)
+    omim_candidates = re.findall(r"\b\d{6}\b", structured_text)
+
+    if omim_candidates:
+        return json.dumps({"OMIM_ID": str(omim_candidates[-1])})
+
+    normalized = structured_text.strip()
+    if normalized:
+        return json.dumps({"OMIM_ID": normalized})
+    return ""
 
 
 def _canonicalize_gene_answer(text: str, prompt: str) -> str:
+    structured_text = _coerce_structured_text_value(text)
+    check_text = structured_text or text
+    ensg_candidates = re.findall(r"\bENSG\d{11}\b", check_text)
+    if ensg_candidates:
+        return ensg_candidates[-1]
+
     candidates = _extract_candidate_genes(prompt)
     if not candidates:
-        return text.strip()
+        return check_text.strip()
 
     for candidate in candidates:
-        if _contains_token(text, candidate):
+        if _contains_token(check_text, candidate):
             return candidate
 
-    return text.strip()
+    return check_text.strip()
 
 
 def normalize_prediction_for_scoring(task_name: str, prompt: str, prediction: Any) -> str:
@@ -154,21 +527,70 @@ def normalize_prediction_for_scoring(task_name: str, prompt: str, prediction: An
     if not text:
         return ""
 
-    text = _extract_solution_text(text).strip()
+    if task_name != "gwas_variant_prioritization":
+        text = _extract_solution_text(text).strip()
     answer_tag = _extract_answer_tag(text)
     if answer_tag:
         text = answer_tag
 
     if task_name in {"crispr_delivery", "hle"} or task_name.startswith("lab_bench"):
-        return _canonicalize_letter_answer(task_name, text)
+        valid_options = _extract_lab_bench_option_letters(prompt) if task_name.startswith("lab_bench") else None
+        return _canonicalize_letter_answer(task_name, text, valid_options=valid_options)
 
     if task_name == "gwas_variant_prioritization":
         return _canonicalize_variant_answer(text, prompt)
 
+    if task_name == "rare_disease_diagnosis":
+        return _canonicalize_rare_disease_answer(text)
+
     if task_name.startswith("gwas_causal_gene") or task_name == "screen_gene_retrieval":
+        return _canonicalize_gene_answer(text, prompt)
+    if task_name == "patient_gene_detection":
         return _canonicalize_gene_answer(text, prompt)
 
     return text.strip()
+
+
+def _extract_last_tool(trajectory: list[Any], agent: Any) -> str:
+    known_tools = {
+        "query_monarch",
+        "query_gwas_catalog",
+        "query_ensembl",
+        "query_info",
+        "query_uniprot",
+        "query_pubmed",
+        "query_scholar",
+        "blast_sequence",
+        "get_rna_seq_archs4",
+        "query_hpo",
+    }
+
+    def _scan_text(value: str) -> str:
+        for tool_name in known_tools:
+            if re.search(rf"\b{re.escape(tool_name)}\b", value):
+                return tool_name
+        return ""
+
+    for step in reversed(trajectory or []):
+        step_text = str(step.get("content", step) if isinstance(step, dict) else step)
+        for execute_block in re.findall(r"<execute>(.*?)</execute>", step_text, re.IGNORECASE | re.DOTALL):
+            last_seen = _scan_text(execute_block)
+            if last_seen:
+                return last_seen
+        match = _scan_text(step_text)
+        if match:
+            return match
+
+    state = getattr(agent, "_conversation_state", None)
+    messages = getattr(state, "get", lambda key, default=None: None)("messages", []) if isinstance(state, dict) else []
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            content = getattr(message, "content", message)
+            last_seen = _scan_text(str(content))
+            if last_seen:
+                return last_seen
+
+    return "unknown"
 
 
 def _count_tool_calls_from_trajectory(trajectory: list[Any]) -> int:
@@ -243,6 +665,326 @@ class EvaluationPipeline:
         self.agent_config = agent_config or {}
         self.completed_instance_ids = completed_instance_ids or {}
         self.instance_timeout_seconds = self.agent_config.pop("agent_timeout_seconds", None)
+        self.data_root = default_config.path
+        self.instance_hard_timeout_seconds = _coerce_env_int(
+            "BIOMNI_INSTANCE_HARD_TIMEOUT_SECONDS",
+            30 * 60,
+        )
+        self.patient_gene_local_kg_enabled = _coerce_env_bool(
+            "BIOMNI_PATIENT_GENE_LOCAL_KG_ENABLED", True
+        )
+        self.patient_gene_local_kg_confidence = _coerce_env_float(
+            "BIOMNI_PATIENT_GENE_LOCAL_KG_CONFIDENCE", 0.55
+        )
+        self.patient_gene_local_kg_max_candidates = _coerce_env_int(
+            "BIOMNI_PATIENT_GENE_LOCAL_KG_MAX_CANDIDATES", 100
+        )
+        self.gwas_variant_tool_call_limit = _coerce_env_int(
+            "BIOMNI_GWAS_TASK_TOOL_CALL_MAX", 12
+        )
+        self.gwas_task_instance_timeout_seconds = _coerce_env_int(
+            "BIOMNI_GWAS_INSTANCE_TIMEOUT_SECONDS", 180
+        )
+        self.gwas_task_step_timeout_seconds = _coerce_env_int(
+            "BIOMNI_GWAS_STEP_TIMEOUT_SECONDS", 90
+        )
+        self.gwas_task_max_steps = _coerce_env_int(
+            "BIOMNI_GWAS_TASK_MAX_STEPS", 24
+        )
+        self.gwas_task_max_recursion = _coerce_env_int(
+            "BIOMNI_GWAS_TASK_RECURSION_LIMIT", 24
+        )
+
+        self._patient_gene_local_kg_resources: dict[str, Any] = {
+            "loaded": False,
+            "kg_df": None,
+            "gene_info_df": None,
+            "ensg_to_symbol": {},
+            "symbol_to_ensg": {},
+            "load_error": None,
+        }
+
+    def _configure_task_tool_budget(self, agent: Any, task_name: str) -> None:
+        """Set optional per-task cumulative tool-call limits on the agent."""
+        is_gwas_task = task_name == "gwas_variant_prioritization"
+        task_limit = self.gwas_variant_tool_call_limit if is_gwas_task else None
+        if task_limit and task_limit > 0:
+            setattr(agent, "_task_tool_call_limit", int(task_limit))
+        else:
+            setattr(agent, "_task_tool_call_limit", None)
+
+        setattr(agent, "_task_name", task_name)
+        if is_gwas_task:
+            setattr(agent, "_task_recursion_limit", max(1, self.gwas_task_max_recursion))
+            setattr(agent, "_task_step_timeout_seconds", max(1, self.gwas_task_step_timeout_seconds))
+            setattr(agent, "_task_max_steps", max(1, self.gwas_task_max_steps))
+        else:
+            setattr(agent, "_task_recursion_limit", None)
+            setattr(agent, "_task_step_timeout_seconds", None)
+            setattr(agent, "_task_max_steps", None)
+
+        setattr(agent, "_task_tool_call_count", 0)
+
+
+    def _load_patient_gene_local_kg_resources(self) -> None:
+        """Load and cache local KG / gene_info resources for patient-gene task."""
+        if self._patient_gene_local_kg_resources["loaded"]:
+            return
+
+        if not self.patient_gene_local_kg_enabled:
+            self._patient_gene_local_kg_resources["loaded"] = True
+            self._patient_gene_local_kg_resources["load_error"] = "disabled"
+            return
+
+        data_root = self.data_root
+        kg_path = os.path.join(data_root, "data_lake", "kg.csv")
+        gene_info_path = os.path.join(data_root, "data_lake", "gene_info.parquet")
+
+        try:
+            kg_df = pd.read_csv(
+                kg_path,
+                usecols=["relation", "display_relation", "x_name", "y_name"],
+                low_memory=False,
+            )
+            kg_df = kg_df.copy()
+            kg_df["x_name_norm"] = kg_df["x_name"].fillna("").astype(str).str.lower().str.strip()
+            kg_df["y_name_norm"] = kg_df["y_name"].fillna("").astype(str).str.lower().str.strip()
+            kg_df = kg_df[
+                (kg_df["x_name_norm"] != "") | (kg_df["y_name_norm"] != "")
+            ]
+
+            gene_info_df = pd.read_parquet(gene_info_path, columns=["ensembl_gene_id", "gene_name"])
+            gene_info_df = gene_info_df.copy()
+            gene_info_df["ensembl_gene_id"] = gene_info_df["ensembl_gene_id"].fillna("").astype(str).str.strip()
+            gene_info_df["gene_name"] = gene_info_df["gene_name"].fillna("").astype(str).str.strip()
+
+            ensg_to_symbol: dict[str, str] = {}
+            symbol_to_ensg: dict[str, str] = {}
+
+            for _, row in gene_info_df.iterrows():
+                ensg = str(row.get("ensembl_gene_id", "")).strip().upper()
+                symbol = str(row.get("gene_name", "")).strip()
+                if not ensg or not symbol:
+                    continue
+                ensg_to_symbol[ensg] = symbol
+                symbol_to_ensg[symbol.upper()] = ensg
+
+            self._patient_gene_local_kg_resources.update(
+                {
+                    "loaded": True,
+                    "kg_df": kg_df,
+                    "gene_info_df": gene_info_df,
+                    "ensg_to_symbol": ensg_to_symbol,
+                    "symbol_to_ensg": symbol_to_ensg,
+                    "load_error": None,
+                }
+            )
+        except Exception as exc:
+            self._patient_gene_local_kg_resources["loaded"] = True
+            self._patient_gene_local_kg_resources["load_error"] = str(exc)
+            self._patient_gene_local_kg_resources["kg_df"] = None
+            self._patient_gene_local_kg_resources["gene_info_df"] = None
+
+    def _solve_patient_gene_from_local_kg(self, prompt: str) -> dict[str, Any] | None:
+        """Try to solve patient-gene instance via local KG before remote tools."""
+        if not self.patient_gene_local_kg_enabled:
+            return None
+
+        candidates, phenotypes = _extract_patient_task_tokens(prompt)
+        if not candidates:
+            return None
+
+        self._load_patient_gene_local_kg_resources()
+        resources = self._patient_gene_local_kg_resources
+
+        if not resources.get("loaded"):
+            return None
+
+        if resources.get("load_error"):
+            if resources.get("load_error") != "disabled":
+                print(f"[local_patient_kg] resource load skipped: {resources.get('load_error')}")
+            return None
+
+        kg_df = resources.get("kg_df")
+        if kg_df is None or kg_df.empty:
+            return None
+
+        ensg_to_symbol = resources.get("ensg_to_symbol", {})
+        symbol_to_ensg = resources.get("symbol_to_ensg", {})
+
+        candidates = candidates[: self.patient_gene_local_kg_max_candidates]
+        candidate_set: set[str] = set()
+        candidate_aliases: dict[str, list[str]] = {}
+
+        for raw in candidates:
+            token = _normalize_gene_token(raw)
+            if not token:
+                continue
+            token_norm = token.lower()
+            if token_norm in candidate_set:
+                continue
+            candidate_set.add(token_norm)
+
+            aliases: list[str] = [raw.strip()]
+            token_upper = raw.strip().upper()
+            if token_upper.startswith("ENSG") and token_upper in ensg_to_symbol:
+                mapped = ensg_to_symbol[token_upper]
+                if mapped and mapped not in aliases:
+                    aliases.append(mapped)
+                candidate_key = _normalize_gene_token(mapped).lower()
+                candidate_set.add(candidate_key)
+                candidate_aliases.setdefault(candidate_key, []).append(mapped)
+            else:
+                mapped_ensg = symbol_to_ensg.get(raw.strip().upper())
+                if mapped_ensg:
+                    aliases.append(mapped_ensg)
+
+            dedup = []
+            for alias in aliases:
+                if alias and alias not in dedup:
+                    dedup.append(alias)
+            candidate_aliases[token_norm] = dedup
+
+        candidate_set = {item for item in candidate_set if item}
+        if not candidate_set:
+            return None
+
+        def _normalize_candidate_to_ensg(token: str) -> list[str]:
+            if not token:
+                return []
+            aliases = [token]
+            token_norm = str(token).strip()
+            if not token_norm:
+                return []
+
+            token_upper = token_norm.upper()
+            if token_upper not in aliases:
+                aliases.append(token_upper)
+            if token_upper.startswith("ENSG") and re.fullmatch(r"ENSG\d{11}", token_upper):
+                return [token_upper]
+
+            mapped_ensg = symbol_to_ensg.get(token_norm.upper())
+            if mapped_ensg:
+                aliases.append(mapped_ensg)
+
+            dedup: list[str] = []
+            for alias in aliases:
+                alias_upper = str(alias).strip().upper()
+                if not alias_upper:
+                    continue
+                if alias_upper.startswith("ENSG") and re.fullmatch(r"ENSG\d{11}", alias_upper):
+                    if alias_upper not in dedup:
+                        dedup.append(alias_upper)
+            return dedup
+
+        phenotype_tokens = [_normalize_gene_token(v).lower() for v in phenotypes]
+        kg_candidates = kg_df[kg_df["x_name_norm"].isin(candidate_set) | kg_df["y_name_norm"].isin(candidate_set)]
+
+        if kg_candidates.empty:
+            return None
+
+        scores: dict[str, float] = defaultdict(float)
+        edge_counts: dict[str, int] = defaultdict(int)
+        score_by_candidate: dict[str, float] = defaultdict(float)
+
+        for _, row in kg_candidates.iterrows():
+            x_name_norm = row.get("x_name_norm", "").lower().strip()
+            y_name_norm = row.get("y_name_norm", "").lower().strip()
+
+            matched_candidates: list[str] = []
+            if x_name_norm in candidate_set:
+                matched_candidates.append(x_name_norm)
+            if y_name_norm in candidate_set and y_name_norm != x_name_norm:
+                matched_candidates.append(y_name_norm)
+
+            if not matched_candidates:
+                continue
+
+            relation_text = str(row.get("display_relation") or row.get("relation") or "")
+            base_score = float(_relation_score(relation_text)) + 2.0
+            if any(
+                _contains_token(relation_text, k)
+                for k in ("causal", "causative", "causes", "associated", "association", "modulates", "regulates", "involved")
+            ):
+                base_score += 1.0
+
+            names_text = f"{row.get('x_name','')} {row.get('y_name','')}"
+            if phenotype_tokens and names_text:
+                for p in phenotype_tokens:
+                    if p and _contains_token(names_text, p):
+                        base_score += 2.0
+                        break
+
+            for matched in matched_candidates:
+                scores[matched] += base_score
+                edge_counts[matched] += 1
+                score_by_candidate[matched] = max(score_by_candidate[matched], base_score)
+
+        if not scores:
+            return None
+
+        sorted_scores = sorted(scores.items(), key=lambda item: (item[1], edge_counts.get(item[0], 0)), reverse=True)
+        if not sorted_scores:
+            return None
+
+        top1_candidate, top1_score = sorted_scores[0]
+        if top1_score <= 0:
+            return None
+
+        if len(sorted_scores) > 1:
+            top2_score = sorted_scores[1][1]
+            confidence = (top1_score + 0.1) / (top2_score + 0.2 + 1e-9)
+        else:
+            confidence = 1.0
+
+        confidence = min(1.0, confidence)
+
+        if confidence < self.patient_gene_local_kg_confidence:
+            return {
+                "method": "local_kg_fallback",
+                "confidence": confidence,
+                "top2_scores": sorted([(k, v) for k, v in sorted_scores[:2]], key=lambda item: item[0]),
+                "solved": False,
+                "prediction": None,
+            }
+
+        alias_values: list[str] = list(candidate_aliases.get(top1_candidate, [top1_candidate]))
+        # Deduplicate while preserving order and remove empty values
+        deduped_aliases: list[str] = []
+        for alias in alias_values:
+            if alias and alias not in deduped_aliases:
+                deduped_aliases.append(alias)
+
+        if not deduped_aliases:
+            return None
+
+        deduped_ensg: list[str] = []
+        for alias in deduped_aliases:
+            for ensg in _normalize_candidate_to_ensg(alias):
+                if ensg not in deduped_ensg:
+                    deduped_ensg.append(ensg)
+        if not deduped_ensg:
+            return {
+                "method": "local_kg_fallback",
+                "confidence": confidence,
+                "top2_scores": sorted([(k, v) for k, v in sorted_scores[:2]], key=lambda item: item[0]),
+                "solved": False,
+                "prediction": None,
+            }
+
+        return {
+            "method": "local_kg",
+            "confidence": confidence,
+            "top2_scores": sorted([(item[0].upper(), item[1]) for item in sorted_scores[:2]], key=lambda item: item[0]),
+            "solved": True,
+            "prediction": {"causal_gene": deduped_ensg},
+            "prediction_meta": {
+                "candidate": top1_candidate,
+                "score": top1_score,
+                "edge_count": edge_counts.get(top1_candidate, 0),
+                "max_peak_score": score_by_candidate.get(top1_candidate, 0.0),
+            },
+        }
 
     def _get_instances_to_evaluate(self, task_name: str, split: str) -> list[Dict[str, Any]]:
         instances = self.benchmark.get_instances(task_name, split)
@@ -331,7 +1073,69 @@ class EvaluationPipeline:
             if self.agent_config:
                 agent.configure(**self.agent_config)
 
-            result_data = self._process_instance(agent, task_name, instance)
+            # Enforce hard per-instance timeout and continue on timeout with 0 score.
+            instance_start_time = time.time()
+            hard_timeout = self.instance_hard_timeout_seconds
+            if hard_timeout is not None and hard_timeout <= 0:
+                hard_timeout = None
+
+            if hard_timeout is None:
+                result_data = self._process_instance(agent, task_name, instance)
+            else:
+                run_result = run_with_timeout(
+                    self._process_instance,
+                    args=[agent, task_name, instance],
+                    timeout=hard_timeout,
+                )
+                if isinstance(run_result, dict):
+                    result_data = run_result
+                else:
+                    timeout_seconds = hard_timeout
+                    elapsed = None
+                    if isinstance(run_result, str):
+                        elapsed_match = re.search(r"elapsed=([0-9]+(?:\.[0-9]+)?)s", run_result)
+                        if elapsed_match:
+                            try:
+                                elapsed = float(elapsed_match.group(1))
+                            except ValueError:
+                                elapsed = None
+                    result_data = {
+                        "task_name": task_name,
+                        "instance_id": instance["instance_id"],
+                        "prompt": instance["prompt"],
+                        "prediction": "ERROR",
+                        "ground_truth": instance["ground_truth"],
+                        "score": 0.0,
+                        "success": False,
+                        "error": run_result if isinstance(run_result, str) else str(run_result),
+                        "trajectory": [],
+                        "metrics": {
+                            "latency": time.time() - instance_start_time,
+                            "tool_calls": 0,
+                            "timeout_source": "run_with_timeout",
+                            "elapsed_seconds": elapsed,
+                            "tool_calls_before_timeout": 0,
+                            "last_tool_used": None,
+                            "patient_gene_local_kg_used": False,
+                            "patient_gene_local_kg_confidence": None,
+                            "patient_gene_local_kg_method": None,
+                            "patient_gene_local_kg_top2_scores": None,
+                            "patient_gene_local_kg_prediction_score": None,
+                            "raw_response_type": type(run_result).__name__,
+                            "normalized_prediction_len": 0,
+                            "token_steps": None,
+                            "token_prompt_total": None,
+                            "token_completion_total": None,
+                            "token_total": None,
+                        },
+                    }
+                    if elapsed is None:
+                        elapsed = time.time() - instance_start_time
+                    print(
+                        f"[timeout] task={task_name} instance={instance['instance_id']} "
+                        f"source=run_with_timeout timeout={timeout_seconds} elapsed={elapsed}s reason={result_data['error']}"
+                    )
+
             self.logger.log_result(result_data)
 
             if result_data["success"]:
@@ -394,54 +1198,120 @@ class EvaluationPipeline:
         score = 0.0
         instance_timed_out = False
         timeout_meta: dict[str, Any] | None = None
+        local_kg_meta: dict[str, Any] = {}
+        used_local_patient_kg = False
 
         def _is_execution_error_output(value: Any) -> bool:
             if not isinstance(value, str):
                 return False
-            return value.startswith(("TIMEOUT:", "ERROR:")) or value.startswith("Error in execution:")
+            prefixes = (
+                "TIMEOUT:",
+                "ERROR:",
+                "Error in execution:",
+                "GWAS_TIMEOUT:",
+                "MONARCH_TIMEOUT:",
+                "ENSEMBL_TIMEOUT:",
+            )
+            return any(value.startswith(prefix) for prefix in prefixes)
 
         def _extract_timeout_metadata(raw: str) -> tuple[float | None, str | None]:
             if not isinstance(raw, str):
                 return None, None
+
+            lowered = raw.lower()
+            if "GWAS_TIMEOUT:" in raw:
+                source = "query_gwas_catalog"
+            elif "MONARCH_TIMEOUT:" in raw:
+                source = "query_monarch"
+            elif "ENSEMBL_TIMEOUT:" in raw:
+                source = "query_ensembl"
+            elif "run_with_timeout" in lowered or "timed out" in lowered:
+                source = "run_with_timeout"
+            else:
+                source = None
+
             match = re.search(r"elapsed=([0-9]+(?:\.[0-9]+)?)s", raw)
             if match:
                 try:
-                    return float(match.group(1)), "run_with_timeout"
+                    return float(match.group(1)), source
                 except ValueError:
                     pass
-            if "timed out" in raw.lower():
-                return None, "run_with_timeout"
+            if "timed out" in lowered:
+                return None, source
             return None, None
 
         try:
-            if self.instance_timeout_seconds is None:
-                log, raw_response = agent.go(prompt)
+            local_patient_solution = (
+                self._solve_patient_gene_from_local_kg(prompt)
+                if task_name == "patient_gene_detection"
+                else None
+            )
+            self._configure_task_tool_budget(agent, task_name)
+
+            if local_patient_solution and local_patient_solution.get("solved"):
+                used_local_patient_kg = True
+                local_kg_meta = {
+                    "patient_gene_local_kg_used": True,
+                    "patient_gene_local_kg_confidence": local_patient_solution.get("confidence"),
+                    "patient_gene_local_kg_method": local_patient_solution.get("method"),
+                    "patient_gene_local_kg_top2_scores": local_patient_solution.get("top2_scores"),
+                    "patient_gene_local_kg_prediction_score": (
+                        local_patient_solution.get("prediction_meta", {}).get("score") if local_patient_solution else None
+                    ),
+                }
+                prediction = local_patient_solution["prediction"]
+                raw_response = prediction
+                trajectory = ["<solution>local_patient_gene_kg</solution>"]
             else:
-                run_result = run_with_timeout(agent.go, args=[prompt], timeout=self.instance_timeout_seconds)
+                local_kg_meta = {
+                    "patient_gene_local_kg_used": False,
+                    "patient_gene_local_kg_confidence": (
+                        local_patient_solution.get("confidence") if local_patient_solution else None
+                    ),
+                    "patient_gene_local_kg_method": (
+                        local_patient_solution.get("method") if local_patient_solution else None
+                    ),
+                    "patient_gene_local_kg_top2_scores": (
+                        local_patient_solution.get("top2_scores") if local_patient_solution else None
+                    ),
+                    "patient_gene_local_kg_prediction_score": None,
+                }
+                # Prefer explicit run timeout from CLI, but apply GWAS hardening default when unset.
+                task_timeout = self.instance_timeout_seconds
+                if self.instance_hard_timeout_seconds is not None and self.instance_hard_timeout_seconds > 0:
+                    if task_timeout is None or task_timeout < self.instance_hard_timeout_seconds:
+                        task_timeout = self.instance_hard_timeout_seconds
+                if task_timeout is None and task_name == "gwas_variant_prioritization":
+                    task_timeout = self.gwas_task_instance_timeout_seconds
 
-                if isinstance(run_result, tuple) and len(run_result) == 2:
-                    log, raw_response = run_result
-                elif _is_execution_error_output(run_result):
-                    instance_timed_out = True
-                    prediction = "ERROR"
-                    error = run_result
-                    timeout_elapsed, timeout_source = _extract_timeout_metadata(error)
-                    timeout_meta = {
-                        "source": timeout_source,
-                        "timeout_seconds": self.instance_timeout_seconds,
-                        "elapsed_seconds": timeout_elapsed,
-                    }
-                    raw_response = run_result
-                    trajectory = []
+                if task_timeout is None:
+                    log, raw_response = agent.go(prompt)
                 else:
-                    # Unexpected return value from timeout wrapper
-                    instance_timed_out = True
-                    prediction = "ERROR"
-                    error = f"Unexpected run_with_timeout result: {run_result!r}"
-                    raw_response = str(run_result)
-                    trajectory = []
+                    run_result = run_with_timeout(agent.go, args=[prompt], timeout=task_timeout)
 
-            if not instance_timed_out:
+                    if isinstance(run_result, tuple) and len(run_result) == 2:
+                        log, raw_response = run_result
+                    elif _is_execution_error_output(run_result):
+                        instance_timed_out = True
+                        prediction = "ERROR"
+                        error = run_result
+                        timeout_elapsed, timeout_source = _extract_timeout_metadata(error)
+                        timeout_meta = {
+                            "source": timeout_source,
+                            "timeout_seconds": task_timeout,
+                            "elapsed_seconds": timeout_elapsed,
+                        }
+                        raw_response = run_result
+                        trajectory = []
+                    else:
+                        # Unexpected return value from timeout wrapper
+                        instance_timed_out = True
+                        prediction = "ERROR"
+                        error = f"Unexpected run_with_timeout result: {run_result!r}"
+                        raw_response = str(run_result)
+                        trajectory = []
+
+            if not instance_timed_out and not used_local_patient_kg:
                 trajectory = log
                 if _is_execution_error_output(raw_response):
                     instance_timed_out = True
@@ -457,7 +1327,7 @@ class EvaluationPipeline:
                     timeout_elapsed, timeout_source = _extract_timeout_metadata(error)
                     timeout_meta = {
                         "source": timeout_source,
-                        "timeout_seconds": self.instance_timeout_seconds,
+                        "timeout_seconds": task_timeout if task_timeout is not None else self.instance_timeout_seconds,
                         "elapsed_seconds": timeout_elapsed,
                     }
 
@@ -495,10 +1365,43 @@ class EvaluationPipeline:
 
         end_time = time.time()
         success = score == 1.0
+        model_name = None
+        llm_obj = getattr(agent, "llm", None)
+        if llm_obj is not None:
+            model_name = getattr(llm_obj, "model_name", None)
+
+        token_usage = _compute_step_token_usage(agent, prompt, model_name=model_name)
+        if token_usage.get("step_count"):
+            print(
+                f"[token] task={task_name} instance={instance['instance_id']} "
+                f"steps={token_usage['step_count']} "
+                f"prompt_tokens={token_usage['total_prompt_tokens']} "
+                f"completion_tokens={token_usage['total_completion_tokens']} "
+                f"total_tokens={token_usage['total_tokens']}"
+            )
+            for step in token_usage["steps"]:
+                print(
+                    f"[token-step] task={task_name} instance={instance['instance_id']} "
+                    f"step={step['step']} prompt={step['prompt_tokens']} "
+                    f"completion={step['completion_tokens']} total={step['total_tokens']}"
+                )
 
         tool_calls = _count_tool_calls_from_trajectory(trajectory)
         if tool_calls == 0:
             tool_calls = _count_tool_calls_from_agent_state(agent)
+        last_tool = _extract_last_tool(trajectory, agent)
+        if instance_timed_out:
+            timeout_meta = timeout_meta or {}
+            timeout_meta = dict(timeout_meta)
+            timeout_meta.setdefault("tool_calls_before_timeout", tool_calls)
+            timeout_meta.setdefault("last_tool_used", last_tool)
+
+        if timeout_meta:
+            print(
+                f"[timeout] task={task_name} instance={instance['instance_id']} "
+                f"tool_calls_before_timeout={timeout_meta.get('tool_calls_before_timeout')} "
+                f"last_tool_used={timeout_meta.get('last_tool_used')}"
+            )
 
         return {
             "task_name": task_name,
@@ -513,7 +1416,20 @@ class EvaluationPipeline:
             "metrics": {
                 "latency": end_time - start_time,
                 "tool_calls": tool_calls,
+                "timeout_source": timeout_meta.get("source") if timeout_meta else None,
+                "elapsed_seconds": timeout_meta.get("elapsed_seconds") if timeout_meta else None,
+                "tool_calls_before_timeout": timeout_meta.get("tool_calls_before_timeout") if timeout_meta else None,
+                "last_tool_used": timeout_meta.get("last_tool_used") if timeout_meta else None,
+                "patient_gene_local_kg_used": bool(local_kg_meta.get("patient_gene_local_kg_used", False)),
+                "patient_gene_local_kg_confidence": local_kg_meta.get("patient_gene_local_kg_confidence"),
+                "patient_gene_local_kg_method": local_kg_meta.get("patient_gene_local_kg_method"),
+                "patient_gene_local_kg_top2_scores": local_kg_meta.get("patient_gene_local_kg_top2_scores"),
+                "patient_gene_local_kg_prediction_score": local_kg_meta.get("patient_gene_local_kg_prediction_score"),
                 "raw_response_type": type(raw_response).__name__,
                 "normalized_prediction_len": len(prediction),
+                "token_steps": token_usage.get("steps"),
+                "token_prompt_total": token_usage.get("total_prompt_tokens"),
+                "token_completion_total": token_usage.get("total_completion_tokens"),
+                "token_total": token_usage.get("total_tokens"),
             },
         }

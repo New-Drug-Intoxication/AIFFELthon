@@ -1112,6 +1112,95 @@ def check_and_download_s3_files(
     return download_results
 
 
+def normalize_gene_info_schema(
+    data_lake_path: str,
+    filename: str = "gene_info.parquet",
+) -> dict[str, Any]:
+    """Normalize gene_info schema for backward compatibility.
+
+    The shipped `gene_info.parquet` may use either ``gene_id`` or
+    ``ensembl_gene_id`` as the identifier column. The code paths used by
+    several tasks often reference ``ensembl_gene_id`` directly, so this helper
+    adds a compatibility alias when missing.
+
+    Returns:
+        Dictionary with status flags and optional message.
+    """
+    path = os.path.join(data_lake_path, filename)
+    if not os.path.exists(path):
+        return {"ok": False, "status": "missing_file", "path": path}
+
+    try:
+        gene_info = pd.read_parquet(path)
+    except Exception as e:  # pragma: no cover - passthrough for IO/parse errors
+        return {"ok": False, "status": "read_error", "path": path, "error": str(e)}
+
+    if "ensembl_gene_id" in gene_info.columns:
+        return {"ok": True, "status": "already_compatible", "path": path}
+
+    candidates = [
+        "ensembl gene id",
+        "ensembl_id",
+        "ensemblid",
+        "gene_id",
+        "ensembl id",
+        "ensg",
+    ]
+
+    def _normalize(col: str) -> str:
+        import re
+
+        return re.sub(r"[^a-z0-9]", "", col.lower())
+
+    normalized = {_normalize(str(c)): c for c in gene_info.columns}
+    mapped = None
+    for cand in candidates:
+        key = _normalize(cand)
+        if key in normalized:
+            mapped = normalized[key]
+            break
+
+    # Fallback: detect value pattern column with ENSEMBL-like identifiers.
+    if mapped is None:
+        for col in gene_info.columns:
+            try:
+                series = gene_info[col].dropna().astype(str).head(300)
+            except Exception:
+                continue
+            if series.empty:
+                continue
+            ratio = series.str.startswith("ENSG").mean()
+            if ratio >= 0.5:
+                mapped = col
+                break
+
+    if mapped is None:
+        return {
+            "ok": False,
+            "status": "missing_ensembl_id_column",
+            "path": path,
+            "columns": list(map(str, gene_info.columns)),
+        }
+
+    try:
+        gene_info["ensembl_gene_id"] = gene_info[mapped]
+        gene_info.to_parquet(path)
+        return {
+            "ok": True,
+            "status": "added_compat_alias",
+            "path": path,
+            "alias_from": mapped,
+        }
+    except Exception as e:  # pragma: no cover - disk/permission or serialization failures
+        return {
+            "ok": False,
+            "status": "write_error",
+            "path": path,
+            "alias_from": mapped,
+            "error": str(e),
+        }
+
+
 def clean_message_content(content: str) -> str:
     """Clean message content by removing ANSI escape codes.
 

@@ -3,6 +3,8 @@ import argparse
 import sqlite3
 import os
 import sys
+import re
+import difflib
 from typing import Callable
 
 # Ensure the biomni package is in the path
@@ -61,6 +63,46 @@ def get_benchmark(benchmark_id: str):
         return BixBenchAdapter()
     else:
         raise ValueError(f"Unknown benchmark: {benchmark_id}")
+
+
+def _normalize_task_name(task_name: str) -> str:
+    """Normalize user-provided task names."""
+    return re.sub(r"_+", "_", task_name.strip().replace("-", "_").lower())
+
+
+def _normalize_tasks(task_names: list[str] | None, valid_tasks: list[str] | None = None) -> tuple[list[str] | None, list[str]]:
+    if task_names is None:
+        return None, []
+
+    normalized = [_normalize_task_name(task) for task in task_names]
+    if valid_tasks is None:
+        return normalized, []
+
+    valid = set(valid_tasks)
+    kept: list[str] = []
+    unknown: list[str] = []
+    for original, normalized_task in zip(task_names, normalized):
+        if normalized_task in valid:
+            if normalized_task not in kept:
+                kept.append(normalized_task)
+        else:
+            unknown.append(original)
+
+    return kept, unknown
+
+
+def _print_task_help(requested: list[str], unknown: list[str], valid_tasks: list[str], benchmark_id: str) -> None:
+    if not unknown:
+        return
+    print(f"Warning: invalid task name(s) for benchmark '{benchmark_id}':")
+    for name in unknown:
+        normalized = _normalize_task_name(name)
+        suggestion = difflib.get_close_matches(normalized, valid_tasks, n=1, cutoff=0.5)
+        suggestion_text = f" | suggestion: {suggestion[0]}" if suggestion else ""
+        print(f"  - {name} -> {normalized}{suggestion_text}")
+    print("Valid tasks:")
+    for task in valid_tasks:
+        print(f"  - {task}")
 
 
 def _normalize_path_for_a1(path: str) -> str:
@@ -158,24 +200,27 @@ def main():
 
     combined_logger = MultiLogger(loggers)
 
+    try:
+        benchmark = get_benchmark(args.benchmark)
+    except Exception as e:
+        print(f"Error loading benchmark: {e}")
+        return
+
+    normalized_tasks, unknown_tasks = _normalize_tasks(args.tasks, benchmark.get_tasks())
+    _print_task_help(args.tasks or [], unknown_tasks, benchmark.get_tasks(), args.benchmark)
+
     completed_instances: dict[str, set[str]] = {}
     if args.resume:
         completed_instances = _load_completed_instance_ids(
             db_path=args.db_path,
             benchmark_id=args.benchmark,
-            tasks=args.tasks,
+            tasks=normalized_tasks,
             experiment_id=args.resume_experiment_id,
         )
         if completed_instances:
             print(f"Resuming from DB: skipping {sum(len(v) for v in completed_instances.values())} instances")
         else:
             print("Resume requested but no completed rows found; running full remaining set.")
-
-    try:
-        benchmark = get_benchmark(args.benchmark)
-    except Exception as e:
-        print(f"Error loading benchmark: {e}")
-        return
 
     agent_factory = make_agent_factory(
         llm=default_config.llm,
@@ -198,7 +243,7 @@ def main():
         completed_instance_ids=completed_instances,
     )
 
-    pipeline.run(tasks=args.tasks, split=args.split)
+    pipeline.run(tasks=normalized_tasks, split=args.split)
 
 
 if __name__ == "__main__":
