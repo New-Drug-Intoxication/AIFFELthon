@@ -5,6 +5,7 @@ debug*
 .*
 wandb/
 tests/
+biomni_eval.db
 
 # Byte-compiled / optimized / DLL files
 biomni_release/biomni_env/biomni_tools/

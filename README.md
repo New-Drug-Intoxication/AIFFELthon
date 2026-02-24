@@ -147,10 +147,3 @@ for row in cur.execute(
     print(row)
 con.close()
 ```
-
----
-
-## 라이선스
-
-- Core 라이선스는 Apache-2.0 기반
-- 각 도구/데이터셋의 상위 라이선스/상업 사용 조건을 반드시 별도 확인
