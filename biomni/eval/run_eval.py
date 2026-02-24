@@ -5,6 +5,7 @@ import os
 import sys
 import re
 import difflib
+from pathlib import Path
 from typing import Callable
 
 # Ensure the biomni package is in the path
@@ -15,6 +16,13 @@ from biomni.config import default_config
 from biomni.eval.benchmark import BixBenchAdapter, BiomniEval1Adapter, LabBenchAdapter
 from biomni.eval.logger import MultiLogger, SQLiteLogger, WandBLogger
 from biomni.eval.pipeline import EvaluationPipeline
+
+
+DEFAULT_DB_PATH = str(Path("data") / "biomni_eval.db")
+
+
+def _resolve_db_path(cli_db_path: str | None) -> str:
+    return cli_db_path or DEFAULT_DB_PATH
 
 
 def _load_completed_instance_ids(db_path: str, benchmark_id: str, tasks: list[str] | None, experiment_id: int | None = None) -> dict[str, set[str]]:
@@ -141,7 +149,12 @@ def main():
     parser.add_argument("--wandb-entity", type=str, default=None, help="WandB entity/username")
     parser.add_argument("--wandb-name", type=str, default=None, help="WandB run name")
     parser.add_argument("--no-wandb", action="store_true", help="Disable WandB logging")
-    parser.add_argument("--db-path", type=str, default="biomni_eval.db", help="SQLite database path")
+    parser.add_argument(
+        "--db-path",
+        type=str,
+        default=DEFAULT_DB_PATH,
+        help="SQLite database path (default: data/biomni_eval.db)",
+    )
     parser.add_argument("--max-instances", type=int, default=None, help="Max instances per task (for testing)")
     parser.add_argument(
         "--agent-timeout-seconds",
@@ -182,8 +195,9 @@ def main():
 
     loggers = []
 
+    db_path = _resolve_db_path(args.db_path)
     sqlite_logger = SQLiteLogger(
-        db_path=args.db_path, experiment_name=args.wandb_name or f"{args.benchmark}_{args.llm or 'default'}"
+        db_path=db_path, experiment_name=args.wandb_name or f"{args.benchmark}_{args.llm or 'default'}"
     )
     loggers.append(sqlite_logger)
 
@@ -212,7 +226,7 @@ def main():
     completed_instances: dict[str, set[str]] = {}
     if args.resume:
         completed_instances = _load_completed_instance_ids(
-            db_path=args.db_path,
+            db_path=db_path,
             benchmark_id=args.benchmark,
             tasks=normalized_tasks,
             experiment_id=args.resume_experiment_id,

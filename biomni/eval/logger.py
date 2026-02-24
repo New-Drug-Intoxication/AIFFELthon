@@ -37,9 +37,10 @@ class BaseLogger(ABC):
 
 
 class SQLiteLogger(BaseLogger):
-    def __init__(self, db_path: str = "biomni_eval.db", experiment_name: str = "default"):
+    def __init__(self, db_path: str = str(Path("data") / "biomni_eval.db"), experiment_name: str = "default"):
         self.db_path = db_path
         self.experiment_name = experiment_name
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
         self.experiment_id = None
         self._setup_db()
