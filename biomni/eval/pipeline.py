@@ -674,7 +674,7 @@ class EvaluationPipeline:
             "BIOMNI_PATIENT_GENE_LOCAL_KG_ENABLED", True
         )
         self.patient_gene_local_kg_confidence = _coerce_env_float(
-            "BIOMNI_PATIENT_GENE_LOCAL_KG_CONFIDENCE", 0.55
+            "BIOMNI_PATIENT_GENE_LOCAL_KG_CONFIDENCE", 1.5
         )
         self.patient_gene_local_kg_max_candidates = _coerce_env_int(
             "BIOMNI_PATIENT_GENE_LOCAL_KG_MAX_CANDIDATES", 100
@@ -697,8 +697,7 @@ class EvaluationPipeline:
 
         self._patient_gene_local_kg_resources: dict[str, Any] = {
             "loaded": False,
-            "kg_df": None,
-            "gene_info_df": None,
+            "gene_hpo_map": {},
             "ensg_to_symbol": {},
             "symbol_to_ensg": {},
             "load_error": None,
@@ -727,7 +726,11 @@ class EvaluationPipeline:
 
 
     def _load_patient_gene_local_kg_resources(self) -> None:
-        """Load and cache local KG / gene_info resources for patient-gene task."""
+        """Load and cache local KG / gene_info resources for patient-gene task.
+
+        Builds a precomputed ``gene_hpo_map``: gene_symbol_lower → set of HPO
+        integer IDs, derived from gene→phenotype edges in the knowledge graph.
+        """
         if self._patient_gene_local_kg_resources["loaded"]:
             return
 
@@ -743,15 +746,29 @@ class EvaluationPipeline:
         try:
             kg_df = pd.read_csv(
                 kg_path,
-                usecols=["relation", "display_relation", "x_name", "y_name"],
+                usecols=["x_type", "y_type", "x_name", "y_name", "y_id"],
                 low_memory=False,
             )
-            kg_df = kg_df.copy()
-            kg_df["x_name_norm"] = kg_df["x_name"].fillna("").astype(str).str.lower().str.strip()
-            kg_df["y_name_norm"] = kg_df["y_name"].fillna("").astype(str).str.lower().str.strip()
-            kg_df = kg_df[
-                (kg_df["x_name_norm"] != "") | (kg_df["y_name_norm"] != "")
-            ]
+
+            # Keep only gene→phenotype edges
+            gp = kg_df[
+                (kg_df["x_type"] == "gene/protein")
+                & (kg_df["y_type"] == "effect/phenotype")
+            ].copy()
+
+            # Build gene_symbol_lower → set[int] (HPO IDs)
+            gene_hpo_map: dict[str, set[int]] = defaultdict(set)
+            for _, row in gp.iterrows():
+                gene = str(row["x_name"]).strip()
+                if not gene:
+                    continue
+                try:
+                    hpo_id = int(row["y_id"])
+                except (TypeError, ValueError):
+                    continue
+                gene_hpo_map[gene.lower()].add(hpo_id)
+
+            del kg_df, gp  # free memory
 
             gene_info_df = pd.read_parquet(gene_info_path, columns=["ensembl_gene_id", "gene_name"])
             gene_info_df = gene_info_df.copy()
@@ -769,11 +786,12 @@ class EvaluationPipeline:
                 ensg_to_symbol[ensg] = symbol
                 symbol_to_ensg[symbol.upper()] = ensg
 
+            print(f"[local_patient_kg] loaded {len(gene_hpo_map)} genes with HPO phenotype mappings")
+
             self._patient_gene_local_kg_resources.update(
                 {
                     "loaded": True,
-                    "kg_df": kg_df,
-                    "gene_info_df": gene_info_df,
+                    "gene_hpo_map": dict(gene_hpo_map),
                     "ensg_to_symbol": ensg_to_symbol,
                     "symbol_to_ensg": symbol_to_ensg,
                     "load_error": None,
@@ -782,11 +800,21 @@ class EvaluationPipeline:
         except Exception as exc:
             self._patient_gene_local_kg_resources["loaded"] = True
             self._patient_gene_local_kg_resources["load_error"] = str(exc)
-            self._patient_gene_local_kg_resources["kg_df"] = None
-            self._patient_gene_local_kg_resources["gene_info_df"] = None
+            self._patient_gene_local_kg_resources["gene_hpo_map"] = {}
+            self._patient_gene_local_kg_resources["ensg_to_symbol"] = {}
+            self._patient_gene_local_kg_resources["symbol_to_ensg"] = {}
 
     def _solve_patient_gene_from_local_kg(self, prompt: str) -> dict[str, Any] | None:
-        """Try to solve patient-gene instance via local KG before remote tools."""
+        """Try to solve patient-gene instance via local KG HPO phenotype matching.
+
+        Algorithm:
+        1. Extract candidate ENSG IDs and HPO IDs from the prompt.
+        2. Map each ENSG candidate → gene symbol via ensg_to_symbol.
+        3. Look up each gene symbol's HPO set from gene_hpo_map.
+        4. Score = |patient_HPOs ∩ gene_HPOs| (intersection count).
+        5. Pick candidate with highest overlap.
+        6. Confidence = top1_overlap / (top2_overlap + 1).
+        """
         if not self.patient_gene_local_kg_enabled:
             return None
 
@@ -805,185 +833,100 @@ class EvaluationPipeline:
                 print(f"[local_patient_kg] resource load skipped: {resources.get('load_error')}")
             return None
 
-        kg_df = resources.get("kg_df")
-        if kg_df is None or kg_df.empty:
+        gene_hpo_map: dict[str, set[int]] = resources.get("gene_hpo_map", {})
+        ensg_to_symbol: dict[str, str] = resources.get("ensg_to_symbol", {})
+        symbol_to_ensg: dict[str, str] = resources.get("symbol_to_ensg", {})
+
+        if not gene_hpo_map:
             return None
 
-        ensg_to_symbol = resources.get("ensg_to_symbol", {})
-        symbol_to_ensg = resources.get("symbol_to_ensg", {})
+        # Parse patient HPO IDs from phenotypes (e.g. "HP:0002240" → 2240)
+        patient_hpos: set[int] = set()
+        for pheno in phenotypes:
+            match = re.search(r"HP:?0*(\d+)", pheno, flags=re.IGNORECASE)
+            if match:
+                try:
+                    patient_hpos.add(int(match.group(1)))
+                except ValueError:
+                    pass
+        # Also scan the raw prompt for any HPO IDs we may have missed
+        for match in re.finditer(r"HP:(\d{7})", prompt, flags=re.IGNORECASE):
+            try:
+                patient_hpos.add(int(match.group(1)))
+            except ValueError:
+                pass
+
+        if not patient_hpos:
+            return None
 
         candidates = candidates[: self.patient_gene_local_kg_max_candidates]
-        candidate_set: set[str] = set()
-        candidate_aliases: dict[str, list[str]] = {}
 
+        # Score each candidate by HPO overlap
+        candidate_scores: list[tuple[str, int, str]] = []  # (ensg, overlap, symbol)
         for raw in candidates:
-            token = _normalize_gene_token(raw)
-            if not token:
-                continue
-            token_norm = token.lower()
-            if token_norm in candidate_set:
-                continue
-            candidate_set.add(token_norm)
-
-            aliases: list[str] = [raw.strip()]
-            token_upper = raw.strip().upper()
-            if token_upper.startswith("ENSG") and token_upper in ensg_to_symbol:
-                mapped = ensg_to_symbol[token_upper]
-                if mapped and mapped not in aliases:
-                    aliases.append(mapped)
-                candidate_key = _normalize_gene_token(mapped).lower()
-                candidate_set.add(candidate_key)
-                candidate_aliases.setdefault(candidate_key, []).append(mapped)
-            else:
-                mapped_ensg = symbol_to_ensg.get(raw.strip().upper())
-                if mapped_ensg:
-                    aliases.append(mapped_ensg)
-
-            dedup = []
-            for alias in aliases:
-                if alias and alias not in dedup:
-                    dedup.append(alias)
-            candidate_aliases[token_norm] = dedup
-
-        candidate_set = {item for item in candidate_set if item}
-        if not candidate_set:
-            return None
-
-        def _normalize_candidate_to_ensg(token: str) -> list[str]:
-            if not token:
-                return []
-            aliases = [token]
-            token_norm = str(token).strip()
-            if not token_norm:
-                return []
-
-            token_upper = token_norm.upper()
-            if token_upper not in aliases:
-                aliases.append(token_upper)
-            if token_upper.startswith("ENSG") and re.fullmatch(r"ENSG\d{11}", token_upper):
-                return [token_upper]
-
-            mapped_ensg = symbol_to_ensg.get(token_norm.upper())
-            if mapped_ensg:
-                aliases.append(mapped_ensg)
-
-            dedup: list[str] = []
-            for alias in aliases:
-                alias_upper = str(alias).strip().upper()
-                if not alias_upper:
-                    continue
-                if alias_upper.startswith("ENSG") and re.fullmatch(r"ENSG\d{11}", alias_upper):
-                    if alias_upper not in dedup:
-                        dedup.append(alias_upper)
-            return dedup
-
-        phenotype_tokens = [_normalize_gene_token(v).lower() for v in phenotypes]
-        kg_candidates = kg_df[kg_df["x_name_norm"].isin(candidate_set) | kg_df["y_name_norm"].isin(candidate_set)]
-
-        if kg_candidates.empty:
-            return None
-
-        scores: dict[str, float] = defaultdict(float)
-        edge_counts: dict[str, int] = defaultdict(int)
-        score_by_candidate: dict[str, float] = defaultdict(float)
-
-        for _, row in kg_candidates.iterrows():
-            x_name_norm = row.get("x_name_norm", "").lower().strip()
-            y_name_norm = row.get("y_name_norm", "").lower().strip()
-
-            matched_candidates: list[str] = []
-            if x_name_norm in candidate_set:
-                matched_candidates.append(x_name_norm)
-            if y_name_norm in candidate_set and y_name_norm != x_name_norm:
-                matched_candidates.append(y_name_norm)
-
-            if not matched_candidates:
+            ensg = raw.strip().upper()
+            if not (ensg.startswith("ENSG") and re.fullmatch(r"ENSG\d{11}", ensg)):
                 continue
 
-            relation_text = str(row.get("display_relation") or row.get("relation") or "")
-            base_score = float(_relation_score(relation_text)) + 2.0
-            if any(
-                _contains_token(relation_text, k)
-                for k in ("causal", "causative", "causes", "associated", "association", "modulates", "regulates", "involved")
-            ):
-                base_score += 1.0
+            symbol = ensg_to_symbol.get(ensg, "")
+            if not symbol:
+                continue
 
-            names_text = f"{row.get('x_name','')} {row.get('y_name','')}"
-            if phenotype_tokens and names_text:
-                for p in phenotype_tokens:
-                    if p and _contains_token(names_text, p):
-                        base_score += 2.0
-                        break
+            gene_hpos = gene_hpo_map.get(symbol.lower(), set())
+            overlap = len(patient_hpos & gene_hpos)
+            candidate_scores.append((ensg, overlap, symbol))
 
-            for matched in matched_candidates:
-                scores[matched] += base_score
-                edge_counts[matched] += 1
-                score_by_candidate[matched] = max(score_by_candidate[matched], base_score)
-
-        if not scores:
+        if not candidate_scores:
             return None
 
-        sorted_scores = sorted(scores.items(), key=lambda item: (item[1], edge_counts.get(item[0], 0)), reverse=True)
-        if not sorted_scores:
-            return None
+        # Sort by overlap descending
+        candidate_scores.sort(key=lambda x: x[1], reverse=True)
 
-        top1_candidate, top1_score = sorted_scores[0]
-        if top1_score <= 0:
-            return None
+        top1_ensg, top1_overlap, top1_symbol = candidate_scores[0]
+        top2_overlap = candidate_scores[1][1] if len(candidate_scores) > 1 else 0
 
-        if len(sorted_scores) > 1:
-            top2_score = sorted_scores[1][1]
-            confidence = (top1_score + 0.1) / (top2_score + 0.2 + 1e-9)
-        else:
-            confidence = 1.0
+        # If top1 has no HPO matches, we can't be confident — fall back to agent
+        if top1_overlap == 0:
+            return {
+                "method": "local_kg_no_overlap",
+                "confidence": 0.0,
+                "top2_scores": [(c[0], c[1]) for c in candidate_scores[:2]],
+                "solved": False,
+                "prediction": None,
+            }
 
-        confidence = min(1.0, confidence)
+        # Confidence: how much better is top1 vs top2
+        confidence = top1_overlap / (top2_overlap + 1)
+
+        debug_info = {
+            "candidate": top1_ensg,
+            "symbol": top1_symbol,
+            "overlap": top1_overlap,
+            "patient_hpo_count": len(patient_hpos),
+        }
+        print(
+            f"[local_patient_kg] top1={top1_symbol}({top1_ensg}) overlap={top1_overlap} "
+            f"top2_overlap={top2_overlap} confidence={confidence:.2f} "
+            f"patient_hpos={len(patient_hpos)}"
+        )
 
         if confidence < self.patient_gene_local_kg_confidence:
             return {
                 "method": "local_kg_fallback",
                 "confidence": confidence,
-                "top2_scores": sorted([(k, v) for k, v in sorted_scores[:2]], key=lambda item: item[0]),
+                "top2_scores": [(c[0], c[1]) for c in candidate_scores[:2]],
                 "solved": False,
                 "prediction": None,
-            }
-
-        alias_values: list[str] = list(candidate_aliases.get(top1_candidate, [top1_candidate]))
-        # Deduplicate while preserving order and remove empty values
-        deduped_aliases: list[str] = []
-        for alias in alias_values:
-            if alias and alias not in deduped_aliases:
-                deduped_aliases.append(alias)
-
-        if not deduped_aliases:
-            return None
-
-        deduped_ensg: list[str] = []
-        for alias in deduped_aliases:
-            for ensg in _normalize_candidate_to_ensg(alias):
-                if ensg not in deduped_ensg:
-                    deduped_ensg.append(ensg)
-        if not deduped_ensg:
-            return {
-                "method": "local_kg_fallback",
-                "confidence": confidence,
-                "top2_scores": sorted([(k, v) for k, v in sorted_scores[:2]], key=lambda item: item[0]),
-                "solved": False,
-                "prediction": None,
+                "prediction_meta": debug_info,
             }
 
         return {
             "method": "local_kg",
             "confidence": confidence,
-            "top2_scores": sorted([(item[0].upper(), item[1]) for item in sorted_scores[:2]], key=lambda item: item[0]),
+            "top2_scores": [(c[0], c[1]) for c in candidate_scores[:2]],
             "solved": True,
-            "prediction": {"causal_gene": deduped_ensg},
-            "prediction_meta": {
-                "candidate": top1_candidate,
-                "score": top1_score,
-                "edge_count": edge_counts.get(top1_candidate, 0),
-                "max_peak_score": score_by_candidate.get(top1_candidate, 0.0),
-            },
+            "prediction": {"causal_gene": [top1_ensg]},
+            "prediction_meta": debug_info,
         }
 
     def _get_instances_to_evaluate(self, task_name: str, split: str) -> list[Dict[str, Any]]:

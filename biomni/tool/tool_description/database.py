@@ -729,7 +729,9 @@ description = [
                           'tool_type': {   'category': 'retrieval',
                                            'domain': 'database'}}},
 {   'description': 'Query the GWAS Catalog API using natural language or a '
-                   'direct endpoint.',
+                   'direct endpoint. When checking multiple genes for a trait, '
+                   'pass genes=["GENE1","GENE2",...] to query ONCE and filter '
+                   'locally (much faster than looping).',
     'name': 'query_gwas_catalog',
     'optional_parameters': [   {   'default': None,
                                    'description': 'Endpoint name (e.g., '
@@ -739,10 +741,22 @@ description = [
                                {   'default': 3,
                                    'description': 'Max results per page (size)',
                                    'name': 'max_results',
-                                   'type': 'int'}],
+                                   'type': 'int'},
+                               {   'default': None,
+                                   'description': 'List of gene names to '
+                                                  'filter results by. Queries '
+                                                  'the API ONCE for the trait '
+                                                  'and filters locally per '
+                                                  'gene. ALWAYS prefer this '
+                                                  'over calling in a loop.',
+                                   'name': 'genes',
+                                   'type': 'list[str]'}],
     'required_parameters': [   {   'default': None,
                                    'description': 'Natural language query '
-                                                  'about GWAS data',
+                                                  'about GWAS data (the '
+                                                  'trait/phenotype only, do '
+                                                  'NOT include gene names '
+                                                  'when using genes param)',
                                    'name': 'prompt',
                                    'type': 'str'}],
     'spec_expansion': {   'failure_pattern': {'do_not': [], 'important': []},

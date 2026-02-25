@@ -186,6 +186,14 @@ def _shorten_for_log(value: Any, max_chars: int = 200) -> str:
     return text[: max_chars - 40] + f"... ({len(text)} chars total)"
 
 
+def _summarize_response_text(response_text: Any, max_chars: int = 2048) -> str:
+    """Summarize long response text for logs while keeping head + total length context."""
+    text = "" if response_text is None else str(response_text)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 80] + f"... ({len(text)} chars total)"
+
+
 def _tool_trace(message: str, **fields: Any) -> None:
     if not _is_tool_trace_enabled():
         return
@@ -412,10 +420,46 @@ def _extract_gwas_endpoint_root(endpoint: str) -> str:
     return no_query.split("/")[0] if no_query else ""
 
 
+_GWAS_MAX_PAGE_SIZE = 20  # Hard cap to prevent slow responses that cause timeouts.
+_GWAS_BATCH_PAGE_SIZE = 20  # Page size used when batch-querying for multiple genes.
+
+
+def _extract_genes_from_gwas_associations(associations: list[dict], gene_set: set[str]) -> dict[str, list[dict]]:
+    """Filter GWAS associations by gene names, returning per-gene matches.
+
+    Scans ``authorReportedGenes`` inside each association locus.
+    """
+    gene_set_upper = {g.upper() for g in gene_set}
+    per_gene: dict[str, list[dict]] = {g: [] for g in gene_set}
+
+    for assoc in associations:
+        loci = assoc.get("loci", [])
+        if not isinstance(loci, list):
+            continue
+        matched_genes: list[str] = []
+        for locus in loci:
+            for gene_entry in locus.get("authorReportedGenes", []):
+                gn = gene_entry.get("geneName", "")
+                if isinstance(gn, str) and gn.upper() in gene_set_upper:
+                    matched_genes.append(gn)
+
+        if matched_genes:
+            summary = _extract_gwas_summary_block(assoc)
+            summary["matched_genes"] = matched_genes
+            for gn in matched_genes:
+                # Map back to original-case key.
+                for original in gene_set:
+                    if original.upper() == gn.upper():
+                        per_gene[original].append(summary)
+                        break
+
+    return per_gene
+
+
 def _clamp_gwas_params(params: Any, max_results: int) -> dict[str, Any]:
     """Clamp/normalize query params for GWAS requests."""
     normalized = params.copy() if isinstance(params, dict) else {}
-    limit_results = _coerce_int(max_results, 3)
+    limit_results = min(_coerce_int(max_results, 3), _GWAS_MAX_PAGE_SIZE)
     normalized["size"] = limit_results
     # Normalize common aliases if present
     for alias in ("limit", "rows", "pageSize"):
@@ -832,33 +876,68 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
         description = f"{method} request to {endpoint}"
     if timeout is None:
         timeout = DEFAULT_HTTP_TIMEOUT
+    normalized_params = params or {}
     query_info = {
         "endpoint": endpoint,
         "method": method,
         "description": description,
         "timeout": timeout,
+        "params": normalized_params,
     }
 
     url_error = None
     start_time = time.perf_counter()
+    prepared_request = requests.Request(
+        method=method.upper(),
+        url=endpoint,
+        params=normalized_params,
+        headers=headers,
+        json=json_data if method.upper() == "POST" else None,
+    ).prepare()
+    full_url = prepared_request.url or endpoint
+    query_info["full_url"] = full_url
     _tool_trace(
         "HTTP call start",
         endpoint=endpoint,
+        full_url=full_url,
         method=method,
-        has_params=bool(params),
+        has_params=bool(normalized_params),
         has_json=bool(json_data),
         timeout=timeout,
     )
 
-    try:
-        # Make the API request
-        if method.upper() == "GET":
-            response = requests.get(endpoint, params=params, headers=headers, timeout=timeout)
-        elif method.upper() == "POST":
-            response = requests.post(endpoint, params=params, headers=headers, json=json_data, timeout=timeout)
-        else:
-            return {"error": f"Unsupported HTTP method: {method}"}
+    max_retries = 1  # Retry once on timeout/connection errors.
+    last_exception = None
+    for _attempt in range(1 + max_retries):
+        if _attempt > 0:
+            time.sleep(2)  # Brief backoff before retry.
+            _tool_trace("HTTP retry", endpoint=endpoint, attempt=_attempt + 1)
+        try:
+            # Make the API request
+            if method.upper() == "GET":
+                response = requests.get(endpoint, params=normalized_params, headers=headers, timeout=timeout)
+            elif method.upper() == "POST":
+                response = requests.post(endpoint, params=normalized_params, headers=headers, json=json_data, timeout=timeout)
+            else:
+                return {"error": f"Unsupported HTTP method: {method}"}
+            last_exception = None
+            break  # Success — exit retry loop.
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_exception = exc
+            continue  # Retry on timeout / transient connection errors.
+        except Exception:
+            raise  # Non-retryable errors propagate immediately.
 
+    if last_exception is not None:
+        raise last_exception  # All retries exhausted — let outer handler format error.
+
+    try:
+
+        content_type = response.headers.get("content-type", "")
+        query_info["content_type"] = content_type
+        query_info["full_url"] = response.url or full_url
+        query_info["status_code"] = getattr(response, "status_code", None)
+        query_info["response_bytes"] = len(response.content) if hasattr(response, "content") else 0
         url_error = str(response.text)
         response.raise_for_status()
 
@@ -867,19 +946,25 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
             result = response.json()
         except ValueError:
             # Return raw text if not JSON
-            result = {"raw_text": response.text}
+            content_type_lower = (content_type or "").lower()
+            if "application/json" in content_type_lower:
+                result = {"raw_text": _summarize_response_text(response.text)}
+            else:
+                result = {
+                    "raw_text": f"NON_JSON_RESPONSE: {content_type or 'unknown'}",
+                }
 
         elapsed_ms = _trace_ms(start_time)
         query_info["elapsed_ms"] = elapsed_ms
-        query_info["status_code"] = getattr(response, "status_code", None)
-        query_info["response_bytes"] = len(response.content) if hasattr(response, "content") else 0
         _tool_trace(
             "HTTP call end",
             endpoint=endpoint,
+            full_url=query_info["full_url"],
             method=method,
             elapsed_ms=f"{elapsed_ms}ms",
             status=query_info["status_code"],
             bytes=query_info["response_bytes"],
+            content_type=content_type,
         )
         return {
             "success": True,
@@ -894,13 +979,18 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
         query_info["elapsed_ms"] = elapsed_ms
         response_obj = locals().get("response", None)
         if response_obj is not None:
+            if hasattr(response_obj, "headers"):
+                query_info["content_type"] = response_obj.headers.get("content-type", "")
             query_info["status_code"] = getattr(response_obj, "status_code", None)
+            query_info["full_url"] = getattr(response_obj, "url", None) or query_info["full_url"]
             query_info["response_bytes"] = (
                 len(response_obj.content) if hasattr(response_obj, "content") else 0
             )
+            query_info["params"] = normalized_params
         _tool_trace(
             "HTTP call error",
             endpoint=endpoint,
+            full_url=query_info.get("full_url"),
             method=method,
             elapsed_ms=f"{elapsed_ms}ms",
             error=str(e),
@@ -918,8 +1008,34 @@ def _query_rest_api(endpoint, method="GET", params=None, headers=None, json_data
                     error_msg = error_json["error"]
                 elif "detail" in error_json:
                     error_msg = error_json["detail"]
+            except (TypeError, ValueError):
+                pass
+
+            content_type = response_obj.headers.get("content-type", "") if response_obj else ""
+            content_type_lower = (content_type or "").lower()
+            try:
+                raw_body = response_obj.text if response_obj is not None else ""
             except Exception:
-                response_text = e.response.text
+                raw_body = ""
+
+            if "application/json" in content_type_lower:
+                response_text = _summarize_response_text(raw_body)
+            else:
+                response_text = f"NON_JSON_RESPONSE: {content_type or 'unknown'}"
+                if not response_text:
+                    response_text = "NON_JSON_RESPONSE: unknown"
+        elif response_obj is not None:
+            content_type = response_obj.headers.get("content-type", "") if hasattr(response_obj, "headers") else ""
+            content_type_lower = (content_type or "").lower()
+            try:
+                raw_body = response_obj.text
+            except Exception:
+                raw_body = ""
+
+            if "application/json" in content_type_lower:
+                response_text = _summarize_response_text(raw_body)
+            else:
+                response_text = f"NON_JSON_RESPONSE: {content_type or 'unknown'}"
 
         return {
             "success": False,
@@ -986,7 +1102,7 @@ def _build_monarch_request(endpoint: str, llm_params: dict[str, Any] | None, max
         query_map.pop(key, None)
 
     normalized_limit = _coerce_int(max_results, 2)
-    normalized_limit = max(1, normalized_limit)
+    normalized_limit = max(1, min(normalized_limit, 20))
     query_map["limit"] = normalized_limit
 
     normalized_endpoint = urlunparse(parsed._replace(query=""))
@@ -1510,7 +1626,7 @@ def query_uniprot(
 
         # UniProt search responses can be huge; enforce a strict cap.
         capped = _coerce_int(max_results, 5)
-        capped = max(1, capped)
+        capped = max(1, min(capped, 20))
         params["size"] = capped
         if normalized_fields:
             params["fields"] = ",".join(dict.fromkeys(normalized_fields))
@@ -3962,22 +4078,30 @@ def query_gwas_catalog(
     prompt=None,
     endpoint=None,
     max_results=3,
+    genes=None,
 ):
     """Query the GWAS Catalog API using natural language or a direct endpoint.
 
     Parameters
     ----------
-    prompt (str, required): Natural language query about GWAS data
+    prompt (str, required): Natural language query about GWAS data (trait/phenotype).
     endpoint (str, optional): Full API endpoint to query (e.g., "https://www.ebi.ac.uk/gwas/rest/api/studies?diseaseTraitId=EFO_0001360")
     max_results (int): Maximum number of results to return
+    genes (list[str], optional): List of gene names to filter results by.
+        When provided, the API is queried ONCE for the trait and
+        results are filtered locally for each gene.  This is much
+        faster than calling the function in a loop for each gene.
 
     Returns
     -------
-    dict: Dictionary containing the query results or error information
+    dict: Dictionary containing the query results or error information.
+        When ``genes`` is provided the result includes a ``per_gene``
+        mapping of gene name to matched associations.
 
     Examples
     --------
     - Natural language: query_gwas_catalog("Find GWAS studies related to Type 2 diabetes")
+    - Batch gene filter: query_gwas_catalog("Type 2 diabetes", genes=["HNF1A", "PPARG", "SLC30A8"])
     - Direct endpoint: query_gwas_catalog(endpoint="studies", params={"diseaseTraitId": "EFO_0001360"})
 
     """
@@ -3987,6 +4111,98 @@ def query_gwas_catalog(
     # Ensure we have either a prompt or an endpoint
     if prompt is None and endpoint is None:
         return {"error": "Either a prompt or an endpoint must be provided"}
+
+    # ── Batch gene mode ──────────────────────────────────────────────
+    # When *genes* is provided together with a prompt we search the
+    # LOCAL GWAS Catalog pickle (620k+ rows) instead of calling the
+    # remote API in a loop.  No LLM call, no HTTP call — instant.
+    if genes and prompt:
+        gene_list = [g.strip() for g in genes if isinstance(g, str) and g.strip()]
+        if not gene_list:
+            return {"error": "genes list is empty after cleaning"}
+
+        import pandas as pd
+
+        gwas_pkl_path = os.path.join(
+            os.path.dirname(__file__), os.pardir, os.pardir,
+            "data", "biomni_data", "data_lake", "gwas_catalog.pkl",
+        )
+        gwas_pkl_path = os.path.normpath(gwas_pkl_path)
+        if not os.path.exists(gwas_pkl_path):
+            # Fallback: try config path.
+            try:
+                from biomni.config import default_config
+                gwas_pkl_path = os.path.join(default_config.path, "data_lake", "gwas_catalog.pkl")
+            except Exception:
+                pass
+
+        if not os.path.exists(gwas_pkl_path):
+            return {"error": f"Local GWAS catalog not found at {gwas_pkl_path}. Cannot use batch gene mode."}
+
+        try:
+            df = pd.read_pickle(gwas_pkl_path)
+        except Exception as exc:
+            return {"error": f"Failed to load local GWAS catalog: {exc}"}
+
+        trait_query = prompt.strip()
+        # Match all words in the prompt against the DISEASE/TRAIT column.
+        # If all-word AND yields 0 rows, progressively drop words from
+        # the end until matches appear (e.g. "breast carcinoma" → "breast").
+        trait_words = [w for w in trait_query.lower().split() if len(w) >= 3]
+        trait_df = pd.DataFrame()
+        if trait_words:
+            for n_words in range(len(trait_words), 0, -1):
+                subset = trait_words[:n_words]
+                mask = df["DISEASE/TRAIT"].str.lower().str.contains(subset[0], na=False)
+                for word in subset[1:]:
+                    mask = mask & df["DISEASE/TRAIT"].str.lower().str.contains(word, na=False)
+                candidate = df[mask]
+                if len(candidate) > 0:
+                    trait_df = candidate
+                    break
+        if trait_df.empty:
+            trait_mask = df["DISEASE/TRAIT"].str.contains(trait_query, case=False, na=False)
+            trait_df = df[trait_mask]
+
+        gene_set_upper = {g.upper() for g in gene_list}
+        per_gene: dict[str, list[dict]] = {g: [] for g in gene_list}
+
+        for gene in gene_list:
+            gene_upper = gene.upper()
+            in_reported = trait_df[
+                trait_df["REPORTED GENE(S)"].str.contains(r'(?:^|[,;\s - ])' + re.escape(gene) + r'(?:$|[,;\s - ])', case=False, na=False)
+            ]
+            in_mapped = trait_df[
+                trait_df["MAPPED_GENE"].str.contains(r'(?:^|[,;\s - ])' + re.escape(gene) + r'(?:$|[,;\s - ])', case=False, na=False)
+            ]
+            combined = pd.concat([in_reported, in_mapped]).drop_duplicates()
+            for _, row in combined.head(5).iterrows():
+                per_gene[gene].append({
+                    "trait": row.get("DISEASE/TRAIT", ""),
+                    "snp": row.get("SNPS", ""),
+                    "pvalue": row.get("P-VALUE", ""),
+                    "reported_genes": row.get("REPORTED GENE(S)", ""),
+                    "mapped_gene": row.get("MAPPED_GENE", ""),
+                    "study": row.get("STUDY", ""),
+                })
+
+        matched_genes = [g for g in gene_list if per_gene.get(g)]
+        unmatched_genes = [g for g in gene_list if not per_gene.get(g)]
+
+        return {
+            "success": True,
+            "per_gene": per_gene,
+            "matched_genes": matched_genes,
+            "unmatched_genes": unmatched_genes,
+            "total_trait_associations": len(trait_df),
+            "query_info": {
+                "source": "local_gwas_catalog",
+                "trait_query": trait_query,
+                "genes_queried": len(gene_list),
+            },
+        }
+    # ── End batch gene mode ──────────────────────────────────────────
+
     llm_query_info: dict[str, Any] = {}
 
     # If using prompt, parse with Claude

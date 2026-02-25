@@ -163,30 +163,47 @@ class BiomniEval1:
         elif task_name == "patient_gene_detection":
             # Patient gene detection expects JSON with causal_gene list
             # Ground truth is a comma-separated string or single gene ID
+            import re as _re
+
             try:
-                if isinstance(user_answer, str):
+                user_dict = None
+                if isinstance(user_answer, dict):
+                    user_dict = user_answer
+                elif isinstance(user_answer, str):
                     try:
                         user_dict = json.loads(user_answer)
                     except json.JSONDecodeError:
-                        import ast
-
-                        user_dict = ast.literal_eval(user_answer)
+                        try:
+                            import ast
+                            user_dict = ast.literal_eval(user_answer)
+                        except Exception:
+                            user_dict = None
                 elif isinstance(user_answer, list):
                     raw_text = self._flatten_content_blocks(user_answer)
                     try:
                         user_dict = json.loads(raw_text)
                     except json.JSONDecodeError:
-                        import ast
-
-                        user_dict = ast.literal_eval(raw_text)
+                        try:
+                            import ast
+                            user_dict = ast.literal_eval(raw_text)
+                        except Exception:
+                            user_dict = None
                 else:
                     user_dict = user_answer
 
                 # Get predicted genes
-                predicted_genes = user_dict.get("causal_gene", [])
-                if not isinstance(predicted_genes, list):
-                    predicted_genes = [predicted_genes]
-                predicted_genes = [self._coerce_text(x).strip() for x in predicted_genes if self._coerce_text(x).strip()]
+                predicted_genes: list[str] = []
+                if isinstance(user_dict, dict):
+                    raw_genes = user_dict.get("causal_gene", [])
+                    if not isinstance(raw_genes, list):
+                        raw_genes = [raw_genes]
+                    predicted_genes = [self._coerce_text(x).strip() for x in raw_genes if self._coerce_text(x).strip()]
+
+                # Fallback: extract ENSG IDs directly from the string
+                if not predicted_genes:
+                    answer_text = self._coerce_text(user_answer)
+                    ensg_ids = _re.findall(r"ENSG\d{11}", answer_text)
+                    predicted_genes = list(dict.fromkeys(ensg_ids))
 
                 # Get ground truth genes (stored as comma-separated or single)
                 if "," in ground_truth_text:
