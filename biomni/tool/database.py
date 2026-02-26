@@ -4079,6 +4079,7 @@ def query_gwas_catalog(
     endpoint=None,
     max_results=3,
     genes=None,
+    verbose=False,
 ):
     """Query the GWAS Catalog API using natural language or a direct endpoint.
 

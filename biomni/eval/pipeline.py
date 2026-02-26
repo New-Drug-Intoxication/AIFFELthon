@@ -697,6 +697,7 @@ class EvaluationPipeline:
 
         self._patient_gene_local_kg_resources: dict[str, Any] = {
             "loaded": False,
+            "p2g_gene_hpo_map": {},
             "gene_hpo_map": {},
             "ensg_to_symbol": {},
             "symbol_to_ensg": {},
@@ -728,8 +729,10 @@ class EvaluationPipeline:
     def _load_patient_gene_local_kg_resources(self) -> None:
         """Load and cache local KG / gene_info resources for patient-gene task.
 
-        Builds a precomputed ``gene_hpo_map``: gene_symbol_lower → set of HPO
-        integer IDs, derived from gene→phenotype edges in the knowledge graph.
+        Primary: builds ``p2g_gene_hpo_map`` (gene_symbol → set of HPO ID
+        strings "HP:XXXXXXX") from the HPO ``phenotype_to_genes.txt`` file.
+        Fallback: builds ``gene_hpo_map`` from the KG's gene→phenotype edges
+        (1621 genes, HPO IDs as integers) for genes not in p2g.
         """
         if self._patient_gene_local_kg_resources["loaded"]:
             return
@@ -740,44 +743,17 @@ class EvaluationPipeline:
             return
 
         data_root = self.data_root
-        kg_path = os.path.join(data_root, "data_lake", "kg.csv")
+        p2g_path = os.path.join(data_root, "data_lake", "phenotype_to_genes.txt")
         gene_info_path = os.path.join(data_root, "data_lake", "gene_info.parquet")
 
         try:
-            kg_df = pd.read_csv(
-                kg_path,
-                usecols=["x_type", "y_type", "x_name", "y_name", "y_id"],
-                low_memory=False,
-            )
-
-            # Keep only gene→phenotype edges
-            gp = kg_df[
-                (kg_df["x_type"] == "gene/protein")
-                & (kg_df["y_type"] == "effect/phenotype")
-            ].copy()
-
-            # Build gene_symbol_lower → set[int] (HPO IDs)
-            gene_hpo_map: dict[str, set[int]] = defaultdict(set)
-            for _, row in gp.iterrows():
-                gene = str(row["x_name"]).strip()
-                if not gene:
-                    continue
-                try:
-                    hpo_id = int(row["y_id"])
-                except (TypeError, ValueError):
-                    continue
-                gene_hpo_map[gene.lower()].add(hpo_id)
-
-            del kg_df, gp  # free memory
-
+            # ── Load gene_info for ENSG→symbol mapping ──────────────────────
             gene_info_df = pd.read_parquet(gene_info_path, columns=["ensembl_gene_id", "gene_name"])
-            gene_info_df = gene_info_df.copy()
             gene_info_df["ensembl_gene_id"] = gene_info_df["ensembl_gene_id"].fillna("").astype(str).str.strip()
             gene_info_df["gene_name"] = gene_info_df["gene_name"].fillna("").astype(str).str.strip()
 
             ensg_to_symbol: dict[str, str] = {}
             symbol_to_ensg: dict[str, str] = {}
-
             for _, row in gene_info_df.iterrows():
                 ensg = str(row.get("ensembl_gene_id", "")).strip().upper()
                 symbol = str(row.get("gene_name", "")).strip()
@@ -786,12 +762,58 @@ class EvaluationPipeline:
                 ensg_to_symbol[ensg] = symbol
                 symbol_to_ensg[symbol.upper()] = ensg
 
-            print(f"[local_patient_kg] loaded {len(gene_hpo_map)} genes with HPO phenotype mappings")
+            # ── Primary: HPO phenotype_to_genes.txt ─────────────────────────
+            p2g_gene_hpo_map: dict[str, set[str]] = defaultdict(set)
+            if os.path.exists(p2g_path):
+                p2g_df = pd.read_csv(
+                    p2g_path,
+                    sep="\t",
+                    comment="#",
+                    header=0,
+                    usecols=["hpo_id", "gene_symbol"],
+                    dtype=str,
+                )
+                for _, row in p2g_df.iterrows():
+                    gene = str(row["gene_symbol"]).strip()
+                    hpo = str(row["hpo_id"]).strip()
+                    if gene and hpo:
+                        p2g_gene_hpo_map[gene].add(hpo)
+                print(f"[local_patient_kg] loaded {len(p2g_gene_hpo_map)} genes from phenotype_to_genes.txt")
+            else:
+                print("[local_patient_kg] phenotype_to_genes.txt not found; falling back to KG-only")
+
+            # ── Fallback: KG gene→phenotype edges ───────────────────────────
+            kg_path = os.path.join(data_root, "data_lake", "kg.csv")
+            gene_hpo_map: dict[str, set[int]] = {}
+            if os.path.exists(kg_path):
+                kg_df = pd.read_csv(
+                    kg_path,
+                    usecols=["x_type", "y_type", "x_name", "y_id"],
+                    low_memory=False,
+                )
+                gp = kg_df[
+                    (kg_df["x_type"] == "gene/protein")
+                    & (kg_df["y_type"] == "effect/phenotype")
+                ].copy()
+                _kg_tmp: dict[str, set[int]] = defaultdict(set)
+                for _, row in gp.iterrows():
+                    gene = str(row["x_name"]).strip()
+                    if not gene:
+                        continue
+                    try:
+                        hpo_id = int(row["y_id"])
+                    except (TypeError, ValueError):
+                        continue
+                    _kg_tmp[gene.lower()].add(hpo_id)
+                gene_hpo_map = dict(_kg_tmp)
+                del kg_df, gp
+                print(f"[local_patient_kg] loaded {len(gene_hpo_map)} genes from kg.csv")
 
             self._patient_gene_local_kg_resources.update(
                 {
                     "loaded": True,
-                    "gene_hpo_map": dict(gene_hpo_map),
+                    "p2g_gene_hpo_map": dict(p2g_gene_hpo_map),
+                    "gene_hpo_map": gene_hpo_map,
                     "ensg_to_symbol": ensg_to_symbol,
                     "symbol_to_ensg": symbol_to_ensg,
                     "load_error": None,
@@ -800,25 +822,28 @@ class EvaluationPipeline:
         except Exception as exc:
             self._patient_gene_local_kg_resources["loaded"] = True
             self._patient_gene_local_kg_resources["load_error"] = str(exc)
+            self._patient_gene_local_kg_resources["p2g_gene_hpo_map"] = {}
             self._patient_gene_local_kg_resources["gene_hpo_map"] = {}
             self._patient_gene_local_kg_resources["ensg_to_symbol"] = {}
             self._patient_gene_local_kg_resources["symbol_to_ensg"] = {}
 
     def _solve_patient_gene_from_local_kg(self, prompt: str) -> dict[str, Any] | None:
-        """Try to solve patient-gene instance via local KG HPO phenotype matching.
+        """Try to solve patient-gene instance via local HPO phenotype matching.
 
-        Algorithm:
-        1. Extract candidate ENSG IDs and HPO IDs from the prompt.
-        2. Map each ENSG candidate → gene symbol via ensg_to_symbol.
-        3. Look up each gene symbol's HPO set from gene_hpo_map.
-        4. Score = |patient_HPOs ∩ gene_HPOs| (intersection count).
-        5. Pick candidate with highest overlap.
-        6. Confidence = top1_overlap / (top2_overlap + 1).
+        Algorithm (primary path — phenotype_to_genes.txt):
+        1. Extract candidate ENSG IDs and patient HPO IDs from the prompt.
+        2. Map each ENSG → gene symbol via ensg_to_symbol.
+        3. For each candidate, score = |patient_HPOs ∩ gene_HPOs| using
+           the HPO phenotype_to_genes.txt mapping (gene_symbol → set["HP:XXXXXXX"]).
+        4. Confidence = top1_overlap / (top2_overlap + 1).
+        5. If confidence ≥ threshold → solve locally; else → fall back to agent.
+
+        Falls back to KG-based integer HPO matching for genes not in p2g.
         """
         if not self.patient_gene_local_kg_enabled:
             return None
 
-        candidates, phenotypes = _extract_patient_task_tokens(prompt)
+        candidates, _phenotypes = _extract_patient_task_tokens(prompt)
         if not candidates:
             return None
 
@@ -833,35 +858,20 @@ class EvaluationPipeline:
                 print(f"[local_patient_kg] resource load skipped: {resources.get('load_error')}")
             return None
 
-        gene_hpo_map: dict[str, set[int]] = resources.get("gene_hpo_map", {})
+        p2g_gene_hpo_map: dict[str, set[str]] = resources.get("p2g_gene_hpo_map", {})
         ensg_to_symbol: dict[str, str] = resources.get("ensg_to_symbol", {})
-        symbol_to_ensg: dict[str, str] = resources.get("symbol_to_ensg", {})
 
-        if not gene_hpo_map:
-            return None
+        # Collect patient HPO IDs in canonical "HP:XXXXXXX" form
+        patient_hpos_str: set[str] = set(re.findall(r"HP:\d{7}", prompt, flags=re.IGNORECASE))
+        # Normalise casing
+        patient_hpos_str = {h.upper() for h in patient_hpos_str}
 
-        # Parse patient HPO IDs from phenotypes (e.g. "HP:0002240" → 2240)
-        patient_hpos: set[int] = set()
-        for pheno in phenotypes:
-            match = re.search(r"HP:?0*(\d+)", pheno, flags=re.IGNORECASE)
-            if match:
-                try:
-                    patient_hpos.add(int(match.group(1)))
-                except ValueError:
-                    pass
-        # Also scan the raw prompt for any HPO IDs we may have missed
-        for match in re.finditer(r"HP:(\d{7})", prompt, flags=re.IGNORECASE):
-            try:
-                patient_hpos.add(int(match.group(1)))
-            except ValueError:
-                pass
-
-        if not patient_hpos:
+        if not patient_hpos_str:
             return None
 
         candidates = candidates[: self.patient_gene_local_kg_max_candidates]
 
-        # Score each candidate by HPO overlap
+        # Score each candidate by HPO overlap using phenotype_to_genes.txt
         candidate_scores: list[tuple[str, int, str]] = []  # (ensg, overlap, symbol)
         for raw in candidates:
             ensg = raw.strip().upper()
@@ -872,8 +882,8 @@ class EvaluationPipeline:
             if not symbol:
                 continue
 
-            gene_hpos = gene_hpo_map.get(symbol.lower(), set())
-            overlap = len(patient_hpos & gene_hpos)
+            gene_hpos_str = p2g_gene_hpo_map.get(symbol, set())
+            overlap = len(patient_hpos_str & gene_hpos_str)
             candidate_scores.append((ensg, overlap, symbol))
 
         if not candidate_scores:
@@ -885,7 +895,7 @@ class EvaluationPipeline:
         top1_ensg, top1_overlap, top1_symbol = candidate_scores[0]
         top2_overlap = candidate_scores[1][1] if len(candidate_scores) > 1 else 0
 
-        # If top1 has no HPO matches, we can't be confident — fall back to agent
+        # If top1 has no HPO matches, fall back to agent
         if top1_overlap == 0:
             return {
                 "method": "local_kg_no_overlap",
@@ -902,12 +912,12 @@ class EvaluationPipeline:
             "candidate": top1_ensg,
             "symbol": top1_symbol,
             "overlap": top1_overlap,
-            "patient_hpo_count": len(patient_hpos),
+            "patient_hpo_count": len(patient_hpos_str),
         }
         print(
             f"[local_patient_kg] top1={top1_symbol}({top1_ensg}) overlap={top1_overlap} "
             f"top2_overlap={top2_overlap} confidence={confidence:.2f} "
-            f"patient_hpos={len(patient_hpos)}"
+            f"patient_hpos={len(patient_hpos_str)}"
         )
 
         if confidence < self.patient_gene_local_kg_confidence:
@@ -921,7 +931,7 @@ class EvaluationPipeline:
             }
 
         return {
-            "method": "local_kg",
+            "method": "local_p2g",
             "confidence": confidence,
             "top2_scores": [(c[0], c[1]) for c in candidate_scores[:2]],
             "solved": True,
