@@ -575,9 +575,10 @@ class MASAgent:
             },
         )
         text = self.llm.complete(prompt, stage=f"plan_r2_text:{domain}").text
-        parsed = self._parse_checkbox_steps(
-            text,
+        parsed = self._parse_checkbox_steps_with_repair(
+            text=text,
             stage=f"plan_r2:{domain}",
+            prompt=prompt,
             default_owner=domain,
             require_owner=False,
         )
@@ -661,11 +662,21 @@ class MASAgent:
             + ", ".join(sorted(allowed_owners))
         )
         text = self.llm.complete(prompt, stage="orchestrator_r21_text").text
-        rows = self._parse_checkbox_steps(
-            text,
+        fallback_rows = [
+            {
+                "step": s.step,
+                "owner_agent": s.owner_agent,
+                "success_criteria": s.success_criteria or "done",
+            }
+            for s in combined
+        ]
+        rows = self._parse_checkbox_steps_with_repair(
+            text=text,
             stage="orchestrator_r21",
+            prompt=prompt,
             default_owner="Common",
             require_owner=True,
+            fallback_rows=fallback_rows,
         )
         out = []
         for i, row in enumerate(rows, start=1):
@@ -765,17 +776,22 @@ class MASAgent:
             + ", ".join(sorted(valid_owners))
         )
         text = self.llm.complete(prompt, stage="orchestrator_r31_text").text
-        try:
-            rows = self._parse_checkbox_steps(
-                text,
-                stage="orchestrator_r31",
-                default_owner="Common",
-                require_owner=True,
-            )
-        except Exception:
-            # Keep workflow moving when R3.1 formatting fails.
-            # Fallback to normalized draft(+critique marker steps) instead of hard stop.
-            return normalized
+        fallback_rows = [
+            {
+                "step": s.step,
+                "owner_agent": s.owner_agent,
+                "success_criteria": s.success_criteria or "done",
+            }
+            for s in normalized
+        ]
+        rows = self._parse_checkbox_steps_with_repair(
+            text=text,
+            stage="orchestrator_r31",
+            prompt=prompt,
+            default_owner="Common",
+            require_owner=True,
+            fallback_rows=fallback_rows,
+        )
         out = []
         for i, row in enumerate(rows, start=1):
             owner = self._resolve_owner_agent(
@@ -841,6 +857,123 @@ class MASAgent:
         if not rows:
             raise RuntimeError(f"{stage} returned no checkbox steps")
         return rows
+
+    @staticmethod
+    def _parse_steps_relaxed(
+        text: str,
+        default_owner: str = "Common",
+        require_owner: bool = False,
+    ) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        for line in text.splitlines():
+            m = re.match(
+                r"^\s*(?:\d+[.)]\s*)?(?:\[(?:\s|✓|✗|x|X)\]\s*)?(?:\[(?P<owner>[^\]]+)\]\s*)?(?P<step>.+?)\s*\|\s*success_criteria\s*:\s*(?P<criteria>.+?)\s*$",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if not m:
+                continue
+            owner_raw = (m.group("owner") or "").strip()
+            if require_owner and not owner_raw:
+                continue
+            owner = owner_raw or default_owner
+            step = (m.group("step") or "").strip()
+            success = (m.group("criteria") or "").strip()
+            if not step or not success:
+                continue
+            rows.append(
+                {
+                    "step": step,
+                    "owner_agent": owner,
+                    "success_criteria": success,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _rows_have_core_fields(rows: list[dict[str, str]], require_owner: bool) -> bool:
+        if not rows:
+            return False
+        for row in rows:
+            step = str(row.get("step", "")).strip()
+            owner = str(row.get("owner_agent", "")).strip()
+            success = str(row.get("success_criteria", "")).strip()
+            if not step:
+                return False
+            if require_owner and not owner:
+                return False
+            if not success or success.lower() == "done":
+                return False
+        return True
+
+    def _parse_checkbox_steps_with_repair(
+        self,
+        *,
+        text: str,
+        stage: str,
+        prompt: str,
+        default_owner: str = "Common",
+        require_owner: bool = False,
+        fallback_rows: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        strict_rows: list[dict[str, str]] = []
+        try:
+            strict_rows = self._parse_checkbox_steps(
+                text,
+                stage=stage,
+                default_owner=default_owner,
+                require_owner=require_owner,
+            )
+        except Exception:
+            strict_rows = []
+
+        relaxed_rows = self._parse_steps_relaxed(
+            text,
+            default_owner=default_owner,
+            require_owner=require_owner,
+        )
+        if relaxed_rows:
+            return relaxed_rows
+        if self._rows_have_core_fields(strict_rows, require_owner=require_owner):
+            return strict_rows
+
+        repair_prompt = (
+            prompt
+            + "\n\n[FORMAT REPAIR]\n"
+            + "Re-output ONLY checklist lines in this exact format:\n"
+            + "N. [ ] [OwnerAgent] step description | success_criteria: one short sentence\n"
+            + "Rules: preserve original intent; do not add explanation; do not output JSON/code.\n"
+            + "If owner is required, include [OwnerAgent] on every line."
+        )
+        repaired_text = self.llm.complete(
+            repair_prompt, stage=f"{stage}_format_repair"
+        ).text
+
+        repaired_relaxed = self._parse_steps_relaxed(
+            repaired_text,
+            default_owner=default_owner,
+            require_owner=require_owner,
+        )
+        if repaired_relaxed:
+            return repaired_relaxed
+
+        repaired_strict: list[dict[str, str]] = []
+        try:
+            repaired_strict = self._parse_checkbox_steps(
+                repaired_text,
+                stage=stage,
+                default_owner=default_owner,
+                require_owner=require_owner,
+            )
+        except Exception:
+            repaired_strict = []
+
+        if self._rows_have_core_fields(repaired_strict, require_owner=require_owner):
+            return repaired_strict
+        if fallback_rows:
+            return fallback_rows
+
+        raise RuntimeError(f"{stage} returned no valid structured checklist steps")
 
     def _execution_loop(self, state: MASState, stream: bool) -> str:
         del state, stream
@@ -2117,9 +2250,9 @@ class MASAgent:
             desc = str(row.get("short_description", "")).strip()
             required = row.get("required_parameters", [])
             optional = row.get("optional_parameters", [])
-            lines.append(f"{i}. {name}")
-            lines.append(f"   - description: {desc if desc else '-'}")
-            lines.append("   - required_parameters:")
+            lines.append(f"{i}. tool_name: {name if name else '-'}")
+            lines.append(f"   description: {desc if desc else '-'}")
+            lines.append("   required_parameters:")
             req_count = 0
             if isinstance(required, list):
                 for p in required:
@@ -2136,7 +2269,7 @@ class MASAgent:
                     )
             if req_count == 0:
                 lines.append("     - (none)")
-            lines.append("   - optional_parameters:")
+            lines.append("   optional_parameters:")
             opt_count = 0
             if isinstance(optional, list):
                 for p in optional:
@@ -2154,7 +2287,6 @@ class MASAgent:
                     )
             if opt_count == 0:
                 lines.append("     - (none)")
-            lines.append(f"   - source: {row.get('tool_file', '')}")
             if i < min(limit, len(tool_bindings)):
                 lines.append("")
         return "\n".join(lines)
@@ -2180,8 +2312,8 @@ class MASAgent:
                 or _clean(x.get("short_description", ""))
                 or "-"
             )
-            lines.append(f"{i}. {name}")
-            lines.append(f"   - description: {desc if desc else '-'}")
+            lines.append(f"{i}. data_name: {name}")
+            lines.append(f"   description: {desc if desc else '-'}")
             if i < min(limit, len(items)):
                 lines.append("")
         return "\n".join(lines)
@@ -2207,10 +2339,8 @@ class MASAgent:
                 or _clean(x.get("short_description", ""))
                 or "-"
             )
-            lines.append(f"{i}. {name}")
-            lines.append(f"   - description: {desc if desc else '-'}")
-            if src:
-                lines.append(f"   - source: {src}")
+            lines.append(f"{i}. library_name: {name}")
+            lines.append(f"   description: {desc if desc else '-'}")
             if i < min(limit, len(items)):
                 lines.append("")
         return "\n".join(lines)

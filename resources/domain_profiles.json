@@ -1,6 +1,6 @@
 {
   "Biochemistry": {
-    "description": "단백질/핵산의 고차 구조 분석 및 효소 반응의 동역학적/열역학적 특성을 분자 수준에서 정량화하는 전문가.",
+    "description": "Expert in quantifying higher-order protein/nucleic acid structure and enzymatic kinetic/thermodynamic properties at the molecular level.",
     "functions": [
       "분광 분석: 원형 이색성(CD) 데이터를 활용한 단백질 2차 구조 비율 산출 및 열 안정성(Tm) 추정.",
       "RNA 구조: dot-bracket 표기법 기반 RNA 2차 구조 특징(Stem, Loop, Stem-loop) 추출 및 앙상블 자유 에너지(ΔG) 계산.",
@@ -10,7 +10,7 @@
     ]
   },
   "Bioengineering": {
-    "description": "생물학적 공정의 공학적 설계, 화학종의 정밀 분석 및 시스템 수준의 대사/신호 네트워크 시뮬레이션 전문가.",
+    "description": "Expert in engineering biological processes, precise chemical-species analysis, and system-level metabolic/signaling network simulation.",
     "functions": [
       "공정 최적화: 반응 표면 분석법(RSM) 및 유전 알고리즘(GA)을 이용한 혐기성 소화 공정(메탄 수율) 최적화 및 감도 분석.",
       "화학종 분석: HPLC-ICP-MS 원시 데이터 기반 비소(As) 등 화학종별 잔류 시간 매칭 및 검량선을 통한 정량 분석.",
@@ -20,7 +20,7 @@
     ]
   },
   "Biophysics": {
-    "description": "물리적 측정 데이터 및 타임랩스 영상을 분석하여 생체 시스템의 구조적 동역학 및 힘의 역학을 연구하는 전문가.",
+    "description": "Expert in analyzing physical measurements and time-lapse imaging to study structural dynamics and force mechanics in biological systems.",
     "functions": [
       "구조 무질서도: IUPred2A 알고리즘을 활용한 단백질 내 본질적 무질서 영역(IDR) 및 결합 모티프(ANCHOR) 예측.",
       "이미지 물리량: Lucas-Kanade 광학 흐름(Optical Flow) 알고리즘 기반 조직의 변형(Strain), 발산(Divergence), 회전(Curl) 역학 정량화.",
@@ -29,7 +29,7 @@
     ]
   },
   "Cell Biology": {
-    "description": "세포의 거시적 행동(이동, 증식, 사멸) 및 세포 내 소기관의 상태를 이미지와 단일 세포 데이터로 추적하는 전문가.",
+    "description": "Expert in tracking cellular behaviors (migration, proliferation, death) and organelle states using imaging and single-cell data.",
     "functions": [
       "세포 추적: trackpy 라이브러리 기반 타임랩스 영상 내 세포 궤적 추적 및 이동 메트릭(Net displacement, 속도, 방향성 비율) 계산.",
       "주기 분석: Calcofluor white 염색 이미지 세그멘테이션을 통한 세포 주기 단계(G1, S, G2/M) 자동 분류 및 비율 정량.",
@@ -40,7 +40,7 @@
     ]
   },
   "Common": {
-    "description": "범용 생물학 데이터베이스 검색, 문헌 정보 추출 및 에이전트 간 공통 코드 실행 인프라 지원.",
+    "description": "Provides shared support for biological database querying, literature extraction, and cross-agent execution infrastructure.",
     "functions": [
       "DB 쿼리: UniProt(단백질), PDB/AlphaFold(구조), KEGG(대사), STRING(상호작용), ClinVar/GEO(변이/발현), JASPAR(모티프) API 연동 데이터 추출.",
       "문헌 검색: PubMed, arXiv, Google Scholar 기반 논문 검색, DOI 기반 보충 자료(Supplementary info) 자동 수집 및 요약.",
@@ -49,7 +49,7 @@
     ]
   },
   "Genetics": {
-    "description": "유전 변이의 탐지, 기능적 영향 예측 및 집단 수준의 유전적 구조를 분석하는 전문가.",
+    "description": "Expert in detecting genetic variants, predicting functional impact, and analyzing population-scale genetic structure.",
     "functions": [
       "변이 분석: VCF(Variant Call Format) 파일 파싱 및 SNP/Indel 변이 필터링(Quality score, Depth 기준)과 기능적 영향(미스센스, 넌센스, 스플라이싱) 주석.",
       "연관 분석: PLINK 기반 GWAS(Genome-Wide Association Study) 수행 및 Manhattan plot 시각화, 유의 SNP 추출.",
@@ -59,7 +59,7 @@
     ]
   },
   "Genomics": {
-    "description": "대규모 유전체 데이터의 조립, 정렬, 발현 정량 및 기능적 해석을 수행하는 전문가.",
+    "description": "Expert in large-scale genomics assembly/alignment, expression quantification, and functional interpretation.",
     "functions": [
       "서열 정렬: BWA/STAR 알고리즘을 이용한 차세대 염기서열(NGS) 데이터의 reference genome 정렬 및 BAM 파일 생성.",
       "전사체 분석: RNA-seq 데이터 정량화(featureCounts) 및 DESeq2 기반 차등 발현 유전자(DEG) 분석.",
@@ -69,7 +69,7 @@
     ]
   },
   "Microbiology": {
-    "description": "미생물의 동정, 군집 구조 분석 및 항생제 내성 메커니즘을 연구하는 전문가.",
+    "description": "Expert in microbial identification, community-structure analysis, and antibiotic resistance mechanisms.",
     "functions": [
       "균 동정: 16S rRNA 서열 기반 BLAST 검색 및 계통수(Phylogenetic tree) 작성.",
       "군집 분석: QIIME2 기반 알파/베타 다양성 분석 및 Bray-Curtis 거리 계산.",
@@ -79,7 +79,7 @@
     ]
   },
   "Molecular Biology": {
-    "description": "분자 수준에서 유전자 발현 조절, 단백질 상호작용 및 클로닝 전략을 설계하는 전문가.",
+    "description": "Expert in molecular-level gene regulation, protein interaction analysis, and cloning strategy design.",
     "functions": [
       "클로닝 설계: 제한효소 사이트 분석 및 Gibson assembly 프라이머 설계.",
       "발현 분석: qPCR Ct 값 정규화(ΔΔCt 방법) 및 상대 발현량 계산.",
@@ -89,7 +89,7 @@
     ]
   },
   "Pathology": {
-    "description": "질병 관련 조직학적, 분자적 변화를 분석하고 임상 데이터와 통합 해석하는 전문가.",
+    "description": "Expert in analyzing disease-related histologic and molecular changes and integrating them with clinical data.",
     "functions": [
       "조직 이미지 분석: H&E 염색 슬라이드에서 세포 밀도 및 핵 이형성 정량화.",
       "종양 분류: CNN 기반 디지털 병리 이미지에서 양성/악성 종양 분류.",
@@ -99,7 +99,7 @@
     ]
   },
   "Pharmacology": {
-    "description": "약물의 작용 기전, 약동학/약력학 특성 및 독성 프로파일을 분석하는 전문가.",
+    "description": "Expert in drug mechanism-of-action, PK/PD characterization, and toxicity profiling.",
     "functions": [
       "약동학 분석: 비구획 분석(NCA)을 통한 Cmax, Tmax, AUC 산출.",
       "용량-반응 곡선: Hill 방정식 기반 EC50/IC50 추정 및 비선형 회귀 피팅.",
@@ -109,7 +109,7 @@
     ]
   },
   "Physiology": {
-    "description": "개체 수준에서 생리적 신호를 측정·모델링하고 항상성 유지 메커니즘을 해석하는 전문가.",
+    "description": "Expert in measuring/modeling organism-level physiological signals and interpreting homeostatic control mechanisms.",
     "functions": [
       "심혈관 분석: ECG 신호 전처리 및 HRV(Heart Rate Variability) 지표 계산.",
       "호흡 생리: 폐활량(spirometry) 데이터 해석 및 FEV1/FVC 비율 분석.",
@@ -119,7 +119,7 @@
     ]
   },
   "Synthetic Biology": {
-    "description": "유전자 회로 설계 및 생물학적 시스템의 인공적 재구성을 수행하는 전문가.",
+    "description": "Expert in synthetic gene circuit design and engineered reprogramming of biological systems.",
     "functions": [
       "유전자 회로 설계: 논리 게이트 기반 합성 유전자 네트워크 설계 및 ODE 모델 시뮬레이션.",
       "CRISPR 설계: gRNA 서열 설계 및 off-target 예측 분석.",

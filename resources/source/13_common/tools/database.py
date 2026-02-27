@@ -112,12 +112,22 @@ def _query_llm_for_api(prompt, schema, system_template):
     dict: Dictionary with 'success', 'data' (if successful), 'error' (if failed), and optional 'raw_response'
 
     """
-    # Use global config for model and api_key
+    # Resolve tool-LLM at call time so it can be decoupled from agent LLM.
+    # Priority: explicit tool env vars -> default config.
     try:
-        model = default_config.llm
-        api_key = default_config.api_key
+        tool_model = os.getenv("MAS_CLAUDE_TOOL_MODEL", "").strip()
+        tool_source = os.getenv("MAS_CLAUDE_TOOL_SOURCE", "").strip()
+        tool_api_key = os.getenv("MAS_CLAUDE_TOOL_API_KEY", "").strip()
+
+        model = tool_model or default_config.llm
+        source = tool_source or ("Anthropic" if tool_model else default_config.source)
+        if source == "Anthropic":
+            api_key = tool_api_key or os.getenv("ANTHROPIC_API_KEY") or default_config.api_key
+        else:
+            api_key = tool_api_key or default_config.api_key
     except Exception:
         model = "claude-3-5-haiku-20241022"
+        source = "Anthropic"
         api_key = None
 
     try:
@@ -134,10 +144,16 @@ def _query_llm_for_api(prompt, schema, system_template):
                 model=model,
                 temperature=0.0,
                 api_key=api_key,
+                source=source or None,
                 config=default_config,
             )
         except Exception:
-            llm = get_llm(model=model, temperature=0.0, api_key=api_key or "EMPTY")
+            llm = get_llm(
+                model=model,
+                temperature=0.0,
+                api_key=api_key or "EMPTY",
+                source=source or None,
+            )
 
         # Compose messages
         messages = [
