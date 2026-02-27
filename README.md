@@ -1,6 +1,8 @@
-# Biomni_MSA_LG
+맨 마지막만 보고 실행? 하면 될 듯 해요
 
-`Biomni_MSA_LG`는 생의학 문제 해결용 멀티 에이전트 시스템입니다.  
+# Biomni_MAS_LG
+
+`Biomni_MAS_LG`는 생의학 문제 해결용 멀티 에이전트 시스템입니다.  
 핵심 오케스트레이션은 LangGraph 상태 그래프로 동작합니다.
 
 ## 핵심 흐름
@@ -14,8 +16,8 @@
 
 ## 디렉터리 구조
 
-- `biomni_msa/`
-  - `agent.py`: public 엔트리(`MSAAgent.go`)
+- `biomni_mas/`
+  - `agent.py`: public 엔트리(`MASAgent.go`)
   - `graph/`: LangGraph 노드/엣지/상태
   - `llm_backend.py`: strict JSON + 토큰 집계
   - `prompt_store.py`: `prompts/runtime` 로딩
@@ -26,40 +28,42 @@
 - `resources/index/master_index.json`: 리소스 인덱스
 - `data_lake/`: 분석 데이터 파일
 - `scripts/`: 다운로드/평가/설치 보조 스크립트
-- `run_msa_agent.py`: 단일 쿼리 실행 CLI
+- `run_mas_agent.py`: 단일 쿼리 실행 CLI
 
 ## 빠른 실행
 
-저장소 루트(`Biomni_MSA_LG`)에서:
+저장소 루트(`Biomni_MAS_LG`)에서:
 
 ```bash
-export MSA_S3_BUCKET_URL="https://biomni-release.s3.amazonaws.com"
-python run_msa_agent.py "Plan a genomics analysis for variant prioritization" --stream
+export MAS_S3_BUCKET_URL="https://biomni-release.s3.amazonaws.com"
+python run_mas_agent.py "Plan a genomics analysis for variant prioritization" --stream
 ```
 
 웹 모니터 실행(노드별 로그 실시간 확인):
 
 ```bash
-python run_msa_web.py --host 127.0.0.1 --port 8080
+python run_mas_web.py --host 127.0.0.1 --port 8080
 # 브라우저에서 http://127.0.0.1:8080 접속
 ```
 
 `.env` 자동 로드:
 
-- 저장소 루트(`Biomni_MSA_LG/.env`)가 있으면 `run_msa_agent.py`, `run_msa_web.py` 실행 시 자동 로드됩니다.
+- 저장소 루트(`Biomni_MAS_LG/.env`)가 있으면 `run_mas_agent.py`, `run_mas_web.py` 실행 시 자동 로드됩니다.
 - 예시:
 
 ```bash
-MSA_LLM_SOURCE=OpenAI
-MSA_LLM=gpt-4o
+MAS_LLM_SOURCE=OpenAI
+MAS_LLM=gpt-4o
 OPENAI_API_KEY=sk-...
-MSA_DATA_LAKE_ROOT=/Users/ohhakgyoun/Desktop/MSA/Biomni_MSA_LG/data_lake
+MAS_DATA_LAKE_ROOT=data_lake
+# optional: enable OpenAI Responses API (default: false)
+MAS_OPENAI_USE_RESPONSES_API=false
 ```
 
 의존성 사전 점검(권장):
 
 ```bash
-python run_msa_agent.py "Plan a genomics analysis for variant prioritization" \
+python run_mas_agent.py "Plan a genomics analysis for variant prioritization" \
   --preflight-deps --preflight-install --stream
 ```
 
@@ -75,19 +79,19 @@ python run_msa_agent.py "Plan a genomics analysis for variant prioritization" \
 ## macOS 실행 예시
 
 ```bash
-cd /Users/ohhakgyoun/Desktop/MSA/Biomni_MSA_LG
+cd /Users/ohhakgyoun/Desktop/MAS/Biomni_MAS_LG
 
-conda env create -n biomni_msa_e1 -f biomni_msa_env/environment.yml
-conda activate biomni_msa_e1
-bash biomni_msa_env/setup.sh
+conda env create -n biomni_mas_e1 -f biomni_mas_env/environment.yml <- 우선 하지 말 것.
+conda activate biomni_mas_e1
+bash biomni_mas_env/setup.sh <- 우선 하지 말 것.
 
-export MSA_LLM="gpt-4o"
-export MSA_LLM_SOURCE="OpenAI"
+export MAS_LLM="gpt-4o"
+export MAS_LLM_SOURCE="OpenAI"
 export OPENAI_API_KEY="<YOUR_OPENAI_API_KEY>"
 export ANTHROPIC_API_KEY="<YOUR_ANTHROPIC_API_KEY>"
-export MSA_DATA_LAKE_ROOT="/Users/ohhakgyoun/Desktop/MSA/Biomni_MSA_LG/data_lake"
+export MAS_DATA_LAKE_ROOT="data_lake"
 
-python run_msa_agent.py "Plan a genomics analysis for variant prioritization" --stream
+python run_mas_agent.py "Plan a genomics analysis for variant prioritization" --stream
 ```
 
 설치 실패 확인:
@@ -138,13 +142,13 @@ python scripts/download_data_lake.py --all
 ## 평가 실행
 
 ```bash
-python scripts/run_msa_eval.py --dry-run --limit 5
-python scripts/run_msa_eval.py --split val --limit 5
+python scripts/run_mas_eval.py --dry-run --limit 5
+python scripts/run_mas_eval.py --split val --limit 5
 ```
 
 ## 인덱스 재생성
 
-`resources/source` 또는 `biomni_msa/know_how` 수정 후:
+`resources/source` 또는 `biomni_mas/know_how` 수정 후:
 
 ```bash
 python resources/scripts/build_master_index.py
@@ -155,7 +159,7 @@ python resources/scripts/build_master_index.py
 - `LLM strict JSON generation failed ...`
   - provider 키/모델/출력 포맷(JSON 계약) 점검
 - 데이터 파일 누락
-  - `MSA_S3_BUCKET_URL` 설정 후 downloader 재실행
+  - `MAS_S3_BUCKET_URL` 설정 후 downloader 재실행
 - eval 의존성 누락
   - `pandas` + parquet 엔진(예: `pyarrow`) 설치
 
@@ -163,3 +167,26 @@ python resources/scripts/build_master_index.py
   - 먼저 preflight 실행:
     - `python scripts/preflight_deps.py`
     - 자동 설치: `python scripts/preflight_deps.py --install`
+
+
+----------------
+# 이거만 보세요!!
+## data_lake 폴더를 만들어서, 거기에 15GB 그거 다운 받아놓으신거 가져오면 됩니다.
+
+# .env 파일 만들어서
+MAS_LLM="gpt-5-mini"
+MAS_LLM_SOURCE="OpenAI"
+OPENAI_API_KEY="api 넣을 것"
+ANTHROPIC_API_KEY="넣을 것" # 근데 코드상에서 query tool에서 ANTHROPIC을 안쓰는거 같은데 코드 만들다가 그걸 코덱스가 수정ㅎ서 gpt로 하게끔 한듯한..?
+MAS_CLAUDE_TOOL_MODEL="claude-4-sonnet-latest"
+MAS_DATA_LAKE_ROOT="data_lake"
+
+
+conda activate biomni_mas_e1
+pip install -r requirements.txt
+
+# web은 이거. 제가 결과 보려고 하는거. 아마 여러분에 맞게 다시 바꾸던가 해야할 듯 한...
+python run_mas_web.py --host 127.0.0.1 --port 8080
+
+# 이건 터미널에서
+python run_msa_agent.py "Query" --preflight-deps --preflight-install --stream 

@@ -1682,7 +1682,7 @@ def analyze_cns_lesion_histology(image_path, output_dir="./output", stain_type="
                         overlay[boundaries, 1:3] = 0.0  # Green and Blue channels
 
                 # Save the overlay image
-                io.imsave(result_filename, (overlay * 255).astype(np.uint8))
+                io.imasve(result_filename, (overlay * 255).astype(np.uint8))
                 log.append(f"Segmentation result saved to: {os.path.basename(result_filename)}")
             except Exception as e:
                 log.append(f"Warning: Could not save segmentation result: {str(e)}")
@@ -1945,7 +1945,7 @@ def analyze_immunohistochemistry_image(image_path, protein_name="Unknown", outpu
 
     # Save results
     segmentation_file = os.path.join(output_dir, f"{base_filename}_segmentation.png")
-    io.imsave(segmentation_file, labeled_mask)
+    io.imasve(segmentation_file, labeled_mask)
 
     # Create a CSV with region properties
     import csv

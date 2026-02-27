@@ -1025,7 +1025,7 @@ def analyze_myofiber_morphology(
     # Save labeled image
     labeled_image = label2rgb(myofiber_labels, image=myofiber_img)
     labeled_image_path = f"{output_dir}/labeled_myofibers_{timestamp}.png"
-    io.imsave(labeled_image_path, (labeled_image * 255).astype(np.uint8))
+    io.imasve(labeled_image_path, (labeled_image * 255).astype(np.uint8))
 
     # Create research log
     log = f"""

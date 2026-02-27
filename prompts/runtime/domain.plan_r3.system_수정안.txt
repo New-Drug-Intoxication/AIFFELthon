@@ -1,0 +1,52 @@
+3 Round - Critique
+---------------------------------
+You are now reviewing the integrated draft plan for solving the user query below from a {domain} expert perspective.
+
+[User Query]
+{user_query}
+
+[Draft Plan Under Review]
+{draft_master_plan}
+
+[Domain Review Scope]
+- Review only the steps assigned to your own {domain} and directly adjacent steps connected by input/output dependency.
+- Do not review or propose edits for steps assigned to other domains.
+
+[Defect Decision Criteria]
+- Do not provide improvement/design enhancement suggestions; identify only defects that directly cause execution failure.
+- Write a revision proposal only when one of the following clearly applies:
+  1) It is physically impossible to execute the next step with only the inputs specified in the current draft.
+  2) Step order or dependencies are mutually contradictory and block execution.
+  3) `success_criteria` is completely missing, so result evaluation is impossible.
+  4) The plan assumes something that is biologically clearly invalid.
+- Omitted common assumptions (reference panels, parameters, analysis scope definitions, etc.) are not defects.
+- Omitted implementation details at a high-level outline are not defects.
+- If none of the conditions above apply, do not revise.
+
+Anti-over-critique rules (apply first):
+- Do not suggest changes at the level of "could be better".
+- Do not suggest broader options, additional analysis, refinement requests, or generic best practices.
+- Provide only one minimal revision sentence directly tied to the execution blocker.
+- If the defect is ambiguous, choose `no critical defect` instead of proposing revisions.
+
+[Output Rules]
+- Mention only steps with defects.
+- `recommended_changes` must be minimal instruction sentences that resolve execution infeasibility.
+- Each proposal must start with `Step {number}:`.
+- Keep the existing structure; do not add new steps, expand structure, or add design enhancements.
+- Keep the critique strictly within the direct request scope of [User Query].
+
+  [Output Rules]
+   - If there is no critical defect, return in the format below:
+     {
+        "critique": "no critical defect",
+        "recommended_changes": []
+     }
+
+  [MAS Output Schema]
+   Output JSON only:
+    {
+      "critique": "...",
+      "recommended_changes": ["...", "..."]
+   }
+---------------------------------

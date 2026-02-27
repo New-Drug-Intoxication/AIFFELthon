@@ -2,7 +2,6 @@ data_lake_dict = {
     "gene_info.parquet": "Comprehensive gene information.",
     "go-plus.json": "Gene ontology data for functional gene annotations.",
     "hp.obo": "Official HPO release in obographs format",
-    "gwas_catalog.pkl": "Genome-wide association studies (GWAS) results.",
     "variant_table.parquet": "Annotated genetic variants table.",
     "genebass_missense_LC_filtered.pkl": "Filtered missense variants from GeneBass.",
     "genebass_pLoF_filtered.pkl": "Predicted loss-of-function variants from GeneBass.",

@@ -1,0 +1,2514 @@
+from __future__ import annotations
+
+import json
+import importlib.util
+import os
+import re
+import shutil
+import sys
+import threading
+import uuid
+from time import perf_counter
+from dataclasses import asdict
+from io import StringIO
+from pathlib import Path
+from typing import Any, Callable
+
+from biomni_mas.config import AgentRuntimeConfig, MASPaths
+from biomni_mas.core.execution import (
+    inject_repl_scope,
+    run_python_repl,
+    run_with_timeout,
+)
+from biomni_mas.core.workspace_alias import (
+    compact_text,
+    coerce_int,
+    ensure_workspace_data_lake_alias,
+    indices_or_ids_to_ids,
+    inject_prompt,
+    prune_empty_prompt_lines,
+    py_literal,
+    to_int_list,
+)
+from biomni_mas.data_lake import ensure_data_lake_files
+from biomni_mas.graph import build_mas_graph
+from biomni_mas.llm_backend import LLMBackend
+from biomni_mas.prompt_store import PromptStore
+from biomni_mas.resource_store import ResourceStore
+from biomni_mas.schemas import (
+    MASState,
+    MessageEvent,
+    RouterOutput,
+    StepSpec,
+    VerifierOutput,
+    VerifierStatus,
+    WorkflowState,
+)
+
+
+DOMAINS = [
+    "Biochemistry",
+    "Bioengineering",
+    "Biophysics",
+    "Cell Biology",
+    "Synthetic Biology",
+    "Genetics",
+    "Genomics",
+    "Microbiology",
+    "Molecular Biology",
+    "Pathology",
+    "Pharmacology",
+    "Physiology",
+    "Common",
+]
+
+_execution_lock = threading.Lock()
+
+
+class MASAgent:
+    def __init__(
+        self,
+        paths: MASPaths | None = None,
+        runtime: AgentRuntimeConfig | None = None,
+        llm_model: str | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
+    ):
+        self.paths = paths or MASPaths.default()
+        self.runtime = runtime or AgentRuntimeConfig()
+        self.prompts = PromptStore(self.paths.prompt_root)
+        self.resources = ResourceStore(
+            self.paths.repo_root, self.paths.resource_index_file
+        )
+        self.domain_profiles = self._load_domain_profiles()
+        self.domain_runtime: dict[str, dict[str, Any]] = {}
+        resolved_model = llm_model or os.getenv("MAS_LLM") or os.getenv("MAS_LLM_MODEL")
+        self.llm = LLMBackend(model_name=resolved_model)
+        self.graph = build_mas_graph(self)
+        self.event_callback = event_callback
+        self.session_id = str(uuid.uuid4())[:8]
+        self.workspace_path = self.paths.workspace_root / self.session_id
+        self._execution_namespace: dict[str, Any] = {}
+
+    def go(
+        self, query: str, verbose: bool | None = None, stream: bool = False
+    ) -> dict[str, Any]:
+        query_started_at = perf_counter()
+        normalized_query = str(query).strip()
+        show_trace = self.runtime.verbose_default if verbose is None else verbose
+        state = MASState(user_query=normalized_query)
+        self._execution_namespace = {}
+        self.llm.reset_usage()
+        final_answer = ""
+        self.workspace_path.mkdir(parents=True, exist_ok=True)
+        # Create data_lake alias in session CWD so relative "data_lake/..." works
+        # after chdir(self.workspace_path) during execution.
+        alias_results = [
+            ensure_workspace_data_lake_alias(
+                workspace_root=self.workspace_path,
+                data_lake_root=self.paths.data_lake_root,
+            ),
+            # Backward compatibility for legacy "../data_lake" references.
+            ensure_workspace_data_lake_alias(
+                workspace_root=self.workspace_path.parent,
+                data_lake_root=self.paths.data_lake_root,
+            ),
+        ]
+        for alias_result in alias_results:
+            if alias_result.status in {
+                "error",
+                "conflict_non_symlink",
+                "broken_expected_target_missing",
+            }:
+                self._emit(
+                    state,
+                    "[Workspace Alias]",
+                    f"status={alias_result.status}",
+                    alias_result.to_dict(),
+                    stream,
+                )
+        try:
+            if not normalized_query:
+                self._set_state(state, WorkflowState.S_ROUTER)
+                router_out = RouterOutput(
+                    selected_agents=[],
+                    route_reason="empty_user_query",
+                    act_required=False,
+                    domain_scores={},
+                )
+                state.router_output = router_out
+                self._emit(
+                    state,
+                    "[Router Message]",
+                    "selected=[], act_required=False (empty query)",
+                    asdict(router_out),
+                    stream,
+                )
+                self._set_state(state, WorkflowState.S_SYNTHESIZER)
+                final_answer = (
+                    "입력된 쿼리가 없습니다. 질의를 입력한 뒤 다시 실행해 주세요."
+                )
+                self._emit(state, "[Synthesizer Message]", final_answer, None, stream)
+                self._sync_token_usage(state)
+                if stream:
+                    totals = state.token_usage_total
+                    print(
+                        "[Token Summary] "
+                        f"input token: {int(totals.get('input', 0))}, "
+                        f"output token: {int(totals.get('output', 0))}, "
+                        f"total token: {int(totals.get('total', 0))}"
+                    )
+                state.query_to_final_ms = max(
+                    1, int((perf_counter() - query_started_at) * 1000)
+                )
+                return self._result(state, final_answer, show_trace)
+
+            result_state = self.graph.invoke(
+                {"mas_state": state, "stream": stream},
+                config={
+                    "recursion_limit": max(1, int(self.runtime.graph_recursion_limit))
+                },
+            )
+            final_answer = str(result_state.get("final_answer", ""))
+            self._sync_token_usage(state)
+            if stream:
+                totals = state.token_usage_total
+                print(
+                    "[Token Summary] "
+                    f"input token: {int(totals.get('input', 0))}, "
+                    f"output token: {int(totals.get('output', 0))}, "
+                    f"total token: {int(totals.get('total', 0))}"
+                )
+            state.query_to_final_ms = max(
+                1, int((perf_counter() - query_started_at) * 1000)
+            )
+            return self._result(state, final_answer, show_trace)
+        except Exception as exc:
+            if exc.__class__.__name__ != "GraphRecursionError":
+                self._sync_token_usage(state)
+                raise
+            self._set_state(state, WorkflowState.S_SYNTHESIZER)
+            final_answer = (
+                "실행 루프가 재귀 제한에 도달해 중단되었습니다. "
+                "질의를 더 구체화하거나 범위를 좁혀 다시 시도해 주세요."
+            )
+            state.replan_history.append(
+                {
+                    "target_step": self._safe_target_step(
+                        state, state.current_step_index
+                    ),
+                    "reason": str(exc),
+                    "applied": False,
+                    "note": "graph_recursion_limit_reached",
+                    "recursion_limit": int(self.runtime.graph_recursion_limit),
+                }
+            )
+            self._emit(
+                state,
+                "[Graph Error]",
+                final_answer,
+                {
+                    "error_type": "GraphRecursionError",
+                    "recursion_limit": int(self.runtime.graph_recursion_limit),
+                    "error": str(exc),
+                },
+                stream,
+            )
+            self._sync_token_usage(state)
+            if stream:
+                totals = state.token_usage_total
+                print(
+                    "[Token Summary] "
+                    f"input token: {int(totals.get('input', 0))}, "
+                    f"output token: {int(totals.get('output', 0))}, "
+                    f"total token: {int(totals.get('total', 0))}"
+                )
+            state.query_to_final_ms = max(
+                1, int((perf_counter() - query_started_at) * 1000)
+            )
+            return self._result(state, final_answer, show_trace)
+        finally:
+            self._execution_namespace = {}
+            if self.workspace_path.exists():
+                shutil.rmtree(self.workspace_path, ignore_errors=True)
+
+    def _run_plan_pipeline(
+        self,
+        state: MASState,
+        selected_agents: list[str],
+        stream: bool,
+    ) -> None:
+        domain_r2_outputs: list[dict[str, Any]] = []
+        domain_r3_outputs: list[dict[str, Any]] = []
+        self.domain_runtime = {}
+
+        for domain in selected_agents:
+            self._set_state(state, WorkflowState.S_PLAN_R1)
+            r1 = self._plan_r1(domain, state.user_query)
+            self._emit(
+                state,
+                f"[Plan-R1 | {domain} Message]",
+                f"selected IDs: tools={len(r1['tools'])}, data={len(r1['data_lake'])}, libs={len(r1['libraries'])}, know_how={len(r1['know_how'])}",
+                r1,
+                stream,
+            )
+            self._set_state(state, WorkflowState.S_PLAN_R2)
+            r2 = self._plan_r2(domain, state.user_query, r1)
+            self.domain_runtime[domain] = {
+                "r1": r1,
+                "resolved": self.resources.resolve_selected(
+                    r1["tools"],
+                    r1["data_lake"],
+                    r1["libraries"],
+                    r1["know_how"],
+                ),
+            }
+            domain_r2_outputs.append({"domain": domain, **r2})
+            r2_steps = r2.get("checklist_steps", [])
+            r2_lines = []
+            for idx, step in enumerate(r2_steps, start=1):
+                step_text = str(step.get("step", "")).strip()
+                success = str(step.get("success_criteria", "done")).strip() or "done"
+                if not step_text:
+                    continue
+                r2_lines.append(f"{idx}. [ ] {step_text} | success_criteria: {success}")
+            r2_content = "\n".join(r2_lines) if r2_lines else f"steps={len(r2_steps)}"
+            self._emit(
+                state,
+                f"[Plan-R2 | {domain} Message]",
+                r2_content,
+                r2,
+                stream,
+            )
+
+        skip_r21 = len(selected_agents) == 1
+        if skip_r21:
+            solo_domain = selected_agents[0]
+            solo_steps = (
+                domain_r2_outputs[0].get("checklist_steps", [])
+                if domain_r2_outputs
+                else []
+            )
+            draft_plan = []
+            for i, row in enumerate(solo_steps, start=1):
+                step_text = str(row.get("step", "")).strip()
+                if not step_text:
+                    continue
+                draft_plan.append(
+                    StepSpec(
+                        step_id=i,
+                        step=step_text,
+                        owner_agent=solo_domain,
+                        success_criteria=str(
+                            row.get("success_criteria", "done")
+                        ).strip()
+                        or "done",
+                    )
+                )
+        else:
+            self._set_state(state, WorkflowState.S_PLAN_R21)
+            draft_plan = self._orchestrator_r21(domain_r2_outputs, state.user_query)
+        state.draft_master_plan = draft_plan
+        draft_lines = []
+        for idx, step in enumerate(draft_plan, start=1):
+            step_text = str(getattr(step, "step", "")).strip()
+            owner = str(getattr(step, "owner_agent", "Common")).strip() or "Common"
+            success = str(getattr(step, "success_criteria", "done")).strip() or "done"
+            if not step_text:
+                continue
+            draft_lines.append(
+                f"{idx}. [ ] {step_text} | owner_agent: {owner} | success_criteria: {success}"
+            )
+        draft_content = (
+            "\n".join(draft_lines) if draft_lines else f"draft steps={len(draft_plan)}"
+        )
+        if not skip_r21:
+            self._emit(
+                state,
+                "[Orchestrator R2.1 Message]",
+                draft_content,
+                {
+                    "draft_master_plan": [asdict(x) for x in draft_plan],
+                    "skipped": False,
+                    "orchestrator_called": True,
+                },
+                stream,
+            )
+
+        for domain in selected_agents:
+            self._set_state(state, WorkflowState.S_PLAN_R3)
+            critique = self._plan_r3(domain, draft_plan, state.user_query)
+            domain_r3_outputs.append({"agent": domain, **critique})
+            self._emit(
+                state,
+                f"[Plan-R3 | {domain} Message]",
+                critique.get("critique", ""),
+                critique,
+                stream,
+            )
+
+        skip_r31 = not self._has_recommended_changes(domain_r3_outputs)
+        if skip_r31:
+            final_plan = [
+                StepSpec(
+                    step_id=step.step_id,
+                    step=step.step,
+                    owner_agent=step.owner_agent,
+                    success_criteria=step.success_criteria,
+                )
+                for step in draft_plan
+            ]
+        else:
+            self._set_state(state, WorkflowState.S_PLAN_R31)
+            final_plan = self._orchestrator_r31(
+                draft_plan,
+                domain_r3_outputs,
+                query=state.user_query,
+                allowed_owners=set(selected_agents) | {"Common"},
+            )
+        state.final_master_plan = final_plan
+        final_lines = []
+        for idx, step in enumerate(final_plan, start=1):
+            step_text = str(getattr(step, "step", "")).strip()
+            owner = str(getattr(step, "owner_agent", "Common")).strip() or "Common"
+            success = str(getattr(step, "success_criteria", "done")).strip() or "done"
+            if not step_text:
+                continue
+            final_lines.append(
+                f"{idx}. [ ] {step_text} | owner_agent: {owner} | success_criteria: {success}"
+            )
+        final_content = (
+            "\n".join(final_lines) if final_lines else f"final steps={len(final_plan)}"
+        )
+        if not skip_r31:
+            self._emit(
+                state,
+                "[Orchestrator R3.1 Message]",
+                final_content,
+                {
+                    "final_master_plan": [asdict(x) for x in final_plan],
+                    "skipped": False,
+                    "orchestrator_called": True,
+                },
+                stream,
+            )
+
+    @staticmethod
+    def _has_recommended_changes(critiques: list[dict[str, Any]]) -> bool:
+        for row in critiques:
+            changes = row.get("recommended_changes", [])
+            if not isinstance(changes, list):
+                continue
+            for change in changes:
+                if str(change).strip():
+                    return True
+        return False
+
+    def _router_stage(self, state: MASState) -> RouterOutput:
+        cutoff = 0.8
+        prompt = self._inject_prompt(
+            self.prompts.router(),
+            {"user_query": state.user_query},
+        )
+        payload = self.llm.complete_json_strict(
+            prompt,
+            required_keys=[
+                "selected_agents",
+                "route_reason",
+                "act_required",
+                "domain_scores",
+            ],
+            retries=self.runtime.json_retries,
+            stage="router",
+        )
+        raw_selected = payload.get("selected_agents", [])
+        selected = raw_selected if isinstance(raw_selected, list) else []
+        domain_scores = {
+            str(k): max(0.0, min(1.0, float(v)))
+            for k, v in payload.get("domain_scores", {}).items()
+        }
+        act_required = bool(payload.get("act_required", False))
+        if self._should_force_act_for_decision_query(state.user_query):
+            act_required = True
+
+        if act_required:
+            selected_norm = [
+                str(x)
+                for x in selected
+                if str(x) in DOMAINS and float(domain_scores.get(str(x), 0.0)) >= cutoff
+            ]
+            if not selected_norm:
+                # Keep pipeline moving: if cutoff removes all, keep the highest-scored
+                # originally selected domain as a fallback.
+                original_selected = [str(x) for x in selected if str(x) in DOMAINS]
+                if original_selected:
+                    best = max(
+                        original_selected,
+                        key=lambda d: float(domain_scores.get(d, 0.0)),
+                    )
+                    selected_norm = [best]
+                else:
+                    guessed = self._guess_domains(state.user_query)
+                    selected_norm = guessed[:1] if guessed else ["Common"]
+        else:
+            # no-act 경로에서는 도메인 선정을 비워 혼선을 줄인다.
+            selected_norm = []
+        return RouterOutput(
+            selected_agents=selected_norm,
+            route_reason=str(payload.get("route_reason", "")),
+            act_required=act_required,
+            domain_scores=domain_scores,
+        )
+
+    def _plan_r1(self, domain: str, query: str) -> dict[str, Any]:
+        domain_slug = domain.lower().replace(" ", "_")
+        indexed = self.resources.list_for_domain(domain_slug)
+        profile = self.domain_profiles.get(domain, {})
+        section = self.prompts.domain_round(
+            "1 Round - Tool Retriever",
+            ["2 Round - Planner", "3 Round - Critique", "Excution"],
+        )
+        prompt = self._inject_prompt(
+            section,
+            {
+                "domain": domain,
+                "domain_description": str(profile.get("description", "")),
+                "domain_functions": self._format_domain_functions(
+                    profile.get("functions", [])
+                ),
+                "user_query": query,
+                "selected_tools_with_desc": self._format_resources_for_plan_prompt(
+                    indexed["tools"], include_index=True, include_id=False
+                ),
+                "selected_data_lake_with_desc": self._format_resources_for_plan_prompt(
+                    indexed["data_lake"], include_index=True, include_id=False
+                ),
+                "selected_libraries_with_desc": self._format_resources_for_plan_prompt(
+                    indexed["libraries"], include_index=True, include_id=False
+                ),
+                "selected_know_how_section": self._format_plan_optional_section(
+                    "사용 가능한 KNOW-HOW",
+                    self._format_resources_for_plan_prompt(
+                        indexed.get("know_how", []),
+                        include_index=True,
+                        include_id=False,
+                    ),
+                ),
+            },
+        )
+        payload = self.llm.complete_json_strict(
+            prompt,
+            required_keys=["tools", "data_lake", "libraries", "know_how"],
+            retries=self.runtime.json_retries,
+            stage=f"plan_r1:{domain}",
+            validator=lambda d: self._validate_r1_indices_with_reason(
+                d,
+                sizes={
+                    "tools": len(indexed["tools"]),
+                    "data_lake": len(indexed["data_lake"]),
+                    "libraries": len(indexed["libraries"]),
+                    "know_how": len(indexed.get("know_how", [])),
+                },
+            ),
+        )
+        return {
+            "tools": self._indices_or_ids_to_ids(
+                self._to_int_list(payload.get("tools", [])),
+                indexed["tools"],
+            ),
+            "data_lake": self._indices_or_ids_to_ids(
+                self._to_int_list(payload.get("data_lake", [])),
+                indexed["data_lake"],
+            ),
+            "libraries": self._indices_or_ids_to_ids(
+                self._to_int_list(payload.get("libraries", [])),
+                indexed["libraries"],
+            ),
+            "know_how": self._indices_or_ids_to_ids(
+                self._to_int_list(payload.get("know_how", [])),
+                indexed.get("know_how", []),
+            ),
+        }
+
+    def _plan_r2(
+        self,
+        domain: str,
+        query: str,
+        r1: dict[str, Any],
+        revision_instruction: str = "",
+    ) -> dict[str, Any]:
+        resolved = self.resources.resolve_selected(
+            r1["tools"], r1["data_lake"], r1["libraries"], r1.get("know_how", [])
+        )
+        profile = self.domain_profiles.get(domain, {})
+        section = self.prompts.domain_round(
+            "2 Round - Planner",
+            ["3 Round - Critique", "Excution"],
+        )
+        prompt = self._inject_prompt(
+            section,
+            {
+                "domain": domain,
+                "domain_description": str(profile.get("description", "")),
+                "domain_functions": self._format_domain_functions(
+                    profile.get("functions", [])
+                ),
+                "user_query": query,
+                "round1_selected_resources": self._format_round1_selection(r1),
+                "selected_tools_with_desc": self._format_resources_for_plan_prompt(
+                    resolved["tools"], include_index=False, include_id=False
+                ),
+                "selected_data_lake_with_desc": self._format_resources_for_plan_prompt(
+                    resolved["data_lake"], include_index=False, include_id=False
+                ),
+                "selected_libraries_with_desc": self._format_resources_for_plan_prompt(
+                    resolved["libraries"], include_index=False, include_id=False
+                ),
+                "selected_know_how_section": self._format_plan_optional_section(
+                    "KNOW-HOW",
+                    self._format_resources_for_plan_prompt(
+                        resolved.get("know_how", []),
+                        include_index=False,
+                        include_id=False,
+                    ),
+                ),
+                "revision_instruction": revision_instruction,
+            },
+        )
+        text = self.llm.complete(prompt, stage=f"plan_r2_text:{domain}").text
+        parsed = self._parse_checkbox_steps(
+            text,
+            stage=f"plan_r2:{domain}",
+            default_owner=domain,
+            require_owner=False,
+        )
+        checklist_steps = []
+        checklist = []
+        for i, item in enumerate(parsed, start=1):
+            step_text = str(item.get("step", "")).strip()
+            if not step_text:
+                continue
+            checklist_steps.append(
+                {
+                    "step_id": i,
+                    "step": step_text,
+                    "owner_agent": None,
+                    "success_criteria": str(item.get("success_criteria", "")).strip()
+                    or "done",
+                }
+            )
+            checklist.append(f"[ ] {step_text}")
+        if not checklist_steps:
+            raise RuntimeError(f"plan_r2 missing checklist steps for domain={domain}")
+        return {
+            "checklist": checklist,
+            "checklist_steps": checklist_steps,
+            "note": "",
+            "domain_thinking": "",
+        }
+
+    def _orchestrator_r21(
+        self, domain_r2_outputs: list[dict[str, Any]], user_query: str
+    ) -> list[StepSpec]:
+        combined: list[StepSpec] = []
+        criteria_map: dict[tuple[str, str], str] = {}
+        seen: set[tuple[str, str]] = set()
+        sid = 1
+        for out in domain_r2_outputs:
+            domain = out["domain"]
+            for srow in out.get("checklist_steps", []):
+                stext = str(srow.get("step", "")).strip().lower()
+                scrit = str(srow.get("success_criteria", "")).strip()
+                if stext and scrit:
+                    criteria_map[(domain, stext)] = scrit
+            for step in out.get("checklist_steps", []):
+                text = str(step.get("step", "")).strip()
+                if not text:
+                    continue
+                key = (domain, text.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                combined.append(
+                    StepSpec(
+                        step_id=sid,
+                        step=text,
+                        owner_agent=domain,
+                        success_criteria=criteria_map.get(
+                            (domain, text.lower()), "done"
+                        ),
+                    )
+                )
+                sid += 1
+        if not combined:
+            raise RuntimeError(
+                "orchestrator_r21 requires non-empty checklist_steps from domains"
+            )
+        section = self.prompts.orchestrator_module("Orchestrator Module 1", [])
+        prompt = self._inject_prompt(
+            section,
+            {
+                "user_query": user_query,
+                "all_agent_round_2_responses": self._format_round2_responses(
+                    domain_r2_outputs
+                ),
+            },
+        )
+        allowed_owners = {str(x.get("domain", "")).strip() for x in domain_r2_outputs}
+        allowed_owners.discard("")
+        allowed_owners.add("Common")
+        prompt += (
+            "\n\nAllowed owner agents for this run (use ONLY these values): "
+            + ", ".join(sorted(allowed_owners))
+        )
+        text = self.llm.complete(prompt, stage="orchestrator_r21_text").text
+        rows = self._parse_checkbox_steps(
+            text,
+            stage="orchestrator_r21",
+            default_owner="Common",
+            require_owner=True,
+        )
+        out = []
+        for i, row in enumerate(rows, start=1):
+            owner = self._resolve_owner_agent(
+                str(row.get("owner_agent", "Common")),
+                allowed=allowed_owners,
+            )
+            step_text = str(row.get("step", "")).strip() or f"draft step {i}"
+            out.append(
+                StepSpec(
+                    step_id=i,
+                    step=step_text,
+                    owner_agent=owner,
+                    success_criteria=criteria_map.get(
+                        (owner, step_text.lower()),
+                        str(row.get("success_criteria", "done")) or "done",
+                    ),
+                )
+            )
+        if not out:
+            raise RuntimeError("orchestrator_r21 returned empty draft_master_plan")
+        return out
+
+    def _plan_r3(
+        self, domain: str, draft_plan: list[StepSpec], user_query: str
+    ) -> dict[str, Any]:
+        section = self.prompts.domain_round("3 Round - Critique", ["Excution"])
+        prompt = self._inject_prompt(
+            section,
+            {
+                "domain": domain,
+                "user_query": user_query,
+                "draft_master_plan": self._format_plan_steps_for_prompt(draft_plan),
+            },
+        )
+        payload = self.llm.complete_json_strict(
+            prompt,
+            required_keys=["critique", "recommended_changes"],
+            retries=self.runtime.json_retries,
+            stage=f"plan_r3:{domain}",
+        )
+        if not isinstance(payload.get("recommended_changes"), list):
+            raise RuntimeError(
+                f"plan_r3 invalid recommended_changes for domain={domain}"
+            )
+        return payload
+
+    def _orchestrator_r31(
+        self,
+        draft: list[StepSpec],
+        critiques: list[dict[str, Any]],
+        query: str,
+        allowed_owners: set[str] | None = None,
+    ) -> list[StepSpec]:
+        normalized: list[StepSpec] = []
+        extra_steps: list[StepSpec] = []
+        for i, step in enumerate(draft, start=1):
+            normalized.append(
+                StepSpec(
+                    step_id=i,
+                    step=step.step,
+                    owner_agent=step.owner_agent,
+                    success_criteria=step.success_criteria or "done",
+                )
+            )
+        sid = len(normalized) + 1
+        for row in critiques:
+            agent = str(row.get("agent", "Common"))
+            for change in row.get("recommended_changes", []) or []:
+                text = str(change).strip()
+                if not text:
+                    continue
+                extra_steps.append(
+                    StepSpec(
+                        step_id=sid,
+                        step=f"Critique update: {text}",
+                        owner_agent=agent,
+                        success_criteria="critique-resolved",
+                    )
+                )
+                sid += 1
+        normalized.extend(extra_steps)
+        section = self.prompts.orchestrator_module("Orchestrator Module 2", [])
+        prompt = self._inject_prompt(
+            section,
+            {
+                "user_query": query,
+                "draft_master_plan": self._format_plan_steps_for_prompt(draft),
+                "all_agent_round_3_critiques": self._format_critiques_for_prompt(
+                    critiques
+                ),
+            },
+        )
+        valid_owners = allowed_owners or (set(DOMAINS) | {"Common"})
+        prompt += (
+            "\n\nAllowed owner agents for this run (use ONLY these values): "
+            + ", ".join(sorted(valid_owners))
+        )
+        text = self.llm.complete(prompt, stage="orchestrator_r31_text").text
+        try:
+            rows = self._parse_checkbox_steps(
+                text,
+                stage="orchestrator_r31",
+                default_owner="Common",
+                require_owner=True,
+            )
+        except Exception:
+            # Keep workflow moving when R3.1 formatting fails.
+            # Fallback to normalized draft(+critique marker steps) instead of hard stop.
+            return normalized
+        out = []
+        for i, row in enumerate(rows, start=1):
+            owner = self._resolve_owner_agent(
+                str(row.get("owner_agent", "Common")),
+                allowed=valid_owners,
+            )
+            out.append(
+                StepSpec(
+                    step_id=i,
+                    step=str(row.get("step", "")).strip() or f"final step {i}",
+                    owner_agent=owner,
+                    success_criteria=str(row.get("success_criteria", "done")) or "done",
+                )
+            )
+        if not out:
+            return normalized
+        return out
+
+    @staticmethod
+    def _parse_checkbox_steps(
+        text: str,
+        stage: str,
+        default_owner: str = "Common",
+        require_owner: bool = False,
+    ) -> list[dict[str, str]]:
+        lines = text.splitlines()
+        rows: list[dict[str, str]] = []
+        for line in lines:
+            m = re.match(
+                r"^\s*(?:\d+[.)]|[-*])\s*(?:\[(?:\s|✓|✗|x|X)\]\s*|[☐☑✅❌]\s*)?(.+?)\s*$",
+                line,
+            )
+            if not m:
+                continue
+            body = m.group(1).strip()
+            if not body:
+                continue
+            owner = default_owner
+            owner_match = re.match(r"^\[(.+?)\]\s*(.+)$", body)
+            if owner_match:
+                owner = owner_match.group(1).strip() or default_owner
+                body = owner_match.group(2).strip()
+            elif require_owner:
+                continue
+            success = "done"
+            sc_match = re.match(
+                r"^(.*?)\s*\|\s*success_criteria\s*:\s*(.+)\s*$",
+                body,
+                flags=re.IGNORECASE,
+            )
+            if sc_match:
+                body = sc_match.group(1).strip()
+                success = sc_match.group(2).strip() or "done"
+            if not body:
+                continue
+            rows.append(
+                {
+                    "step": body,
+                    "owner_agent": owner,
+                    "success_criteria": success,
+                }
+            )
+        if not rows:
+            raise RuntimeError(f"{stage} returned no checkbox steps")
+        return rows
+
+    def _execution_loop(self, state: MASState, stream: bool) -> str:
+        del state, stream
+        raise RuntimeError(
+            "_execution_loop is deprecated. Execution flow is managed by LangGraph nodes."
+        )
+
+    def _run_code(self, code: str, tool_scope: dict[str, Any]) -> str:
+        try:
+            tool_scope_error = str(tool_scope.get("__tool_scope_error__", "")).strip()
+            if tool_scope_error:
+                return f"Error: {tool_scope_error}"
+            # Isolate per-step namespace to prevent timed-out/background execution
+            # from mutating shared session namespace.
+            step_namespace: dict[str, Any] = dict(self._execution_namespace)
+            inject_repl_scope(tool_scope, step_namespace)
+            with _execution_lock:
+                old_cwd = os.getcwd()
+                old_data_lake_env = os.getenv("MAS_DATA_LAKE_ROOT")
+                os.chdir(self.workspace_path)
+                os.environ["MAS_DATA_LAKE_ROOT"] = str(self.paths.data_lake_root)
+                try:
+                    output = str(
+                        run_with_timeout(
+                            run_python_repl,
+                            args=[code, step_namespace],
+                            timeout=self.runtime.timeout_seconds,
+                        )
+                    )
+                    if not output.startswith("TIMEOUT:") and not output.startswith(
+                        "Error:"
+                    ):
+                        self._execution_namespace = step_namespace
+                    return output
+                finally:
+                    if old_data_lake_env is None:
+                        os.environ.pop("MAS_DATA_LAKE_ROOT", None)
+                    else:
+                        os.environ["MAS_DATA_LAKE_ROOT"] = old_data_lake_env
+                    os.chdir(old_cwd)
+        except Exception as e:
+            return f"Error: execution runtime failure before run_with_timeout: {e}"
+
+    def _generate_execution_step(
+        self,
+        step: StepSpec,
+        user_query: str,
+        context_handoff: dict[str, Any] | None,
+        data_catalog: list[dict[str, Any]],
+    ) -> tuple[str, str]:
+        section = self.prompts.domain_round("1 Round - Write and run code", [])
+        profile = self.domain_profiles.get(step.owner_agent, {})
+        runtime_ctx = self.domain_runtime.get(step.owner_agent, {})
+        resolved = runtime_ctx.get("resolved", {})
+        tool_bindings = self._build_tool_bindings(
+            step.owner_agent, resolved.get("tools", [])
+        )
+        allowed_tool_names = [x["name"] for x in tool_bindings]
+        resolved_for_prompt = resolved
+        catalog_for_prompt = data_catalog
+        prompt = self._inject_prompt(
+            section,
+            {
+                "domain": step.owner_agent,
+                "domain_description": str(profile.get("description", "")),
+                "domain_functions": self._format_domain_functions(
+                    profile.get("functions", [])
+                ),
+                "user_query": user_query,
+                "current_step_description": step.step,
+                "success_criteria": step.success_criteria,
+                "context_handoff_from_orchestrator": self._format_context_handoff_for_prompt(
+                    context_handoff
+                ),
+                "selected_tools_with_desc": self._format_tool_specs_for_exec_prompt(
+                    tool_bindings, limit=80
+                ),
+                "selected_data_lake_with_desc": self._format_data_resources_for_exec_prompt(
+                    resolved_for_prompt.get("data_lake", []), limit=80
+                ),
+                "selected_libraries_with_desc": self._format_library_resources_for_exec_prompt(
+                    resolved_for_prompt.get("libraries", []), limit=80
+                ),
+                "allowed_tools_for_exec": self._format_allowed_tools_for_prompt(
+                    allowed_tool_names
+                ),
+                "data_file_candidates": self._format_data_catalog_lines(
+                    catalog_for_prompt
+                ),
+            },
+        )
+        prompt += (
+            "\n\n[Runtime Tool Binding Rule]\n"
+            "- Tool functions are pre-injected into runtime scope.\n"
+            "- Call tool functions directly by function name.\n"
+            "- Do not import tool modules manually.\n"
+            "- DO NOT use `import tools`, `from tools import ...`, or `from mas_tools ...`.\n"
+            f"- Allowed tool names:\n{self._format_allowed_tools_for_prompt(allowed_tool_names)}\n"
+        )
+        prompt += (
+            "\n[File Path and Workspace Rule]\n"
+            "- The current working directory (CWD) is a dedicated temporary workspace for this session.\n"
+            "- Save ALL output files, plots, and temporary results in the CWD ('.').\n"
+            "- When saving files, use simple filenames or relative paths within the CWD.\n"
+            "- DATA LAKE root must be resolved at runtime using env var: os.getenv('MAS_DATA_LAKE_ROOT', 'data_lake').\n"
+            "- Runtime guarantees MAS_DATA_LAKE_ROOT is an absolute path for this step.\n"
+            "- For file reads, build paths with os.path.join(data_root, <filename>).\n"
+            "- Never hardcode absolute machine-local paths (e.g., '/Users/...').\n"
+            "- Do not assume '../data_lake'; treat it as unsupported unless explicitly provided.\n"
+        )
+        retries = max(2, self.runtime.json_retries + 2)
+        last_reason = "execute_block_missing"
+        for attempt in range(retries):
+            attempt_prompt = prompt
+            if attempt > 0:
+                attempt_prompt += (
+                    "\n\n반드시 하나의 <execute>...</execute> 블록만 출력하십시오."
+                    "\n설명문, JSON, 마크다운은 금지합니다."
+                    f"\n직전 실패 사유: {last_reason}"
+                )
+            resp = self.llm.complete(
+                attempt_prompt,
+                stage=f"exec_r1:{step.owner_agent}:step{step.step_id}",
+            ).text
+            ok, payload = self._extract_execute_block_with_reason(resp)
+            if ok:
+                valid, reason = self._validate_exec_code_with_reason(
+                    payload,
+                    allowed_tool_names=set(allowed_tool_names),
+                )
+                if not valid:
+                    last_reason = reason
+                    continue
+                return "", payload
+            last_reason = payload
+        raise RuntimeError(
+            f"Execution R1 code generation failed at step {step.step_id}: {last_reason}"
+        )
+
+    @staticmethod
+    def _format_domain_functions(functions: Any) -> str:
+        if not isinstance(functions, list):
+            return str(functions)
+        lines = []
+        for i, item in enumerate(functions, start=1):
+            text = str(item).strip()
+            if text:
+                lines.append(f"{i}. {text}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_round1_selection(r1: dict[str, Any]) -> str:
+        tools = ", ".join(str(x) for x in r1.get("tools", [])) or "-"
+        data_lake = ", ".join(str(x) for x in r1.get("data_lake", [])) or "-"
+        libraries = ", ".join(str(x) for x in r1.get("libraries", [])) or "-"
+        know_how = ", ".join(str(x) for x in r1.get("know_how", [])) or "-"
+        return (
+            f"tools: {tools}\n"
+            f"data_lake: {data_lake}\n"
+            f"libraries: {libraries}\n"
+            f"know_how: {know_how}"
+        )
+
+    @staticmethod
+    def _format_round2_responses(domain_r2_outputs: list[dict[str, Any]]) -> str:
+        chunks: list[str] = []
+        for row in domain_r2_outputs:
+            domain = str(row.get("domain", ""))
+            checklist = row.get("checklist", [])
+            thinking = str(row.get("domain_thinking", "")).strip()
+            lines = [f"[Agent] {domain}"]
+            if isinstance(checklist, list) and checklist:
+                lines.append("checklist:")
+                for i, item in enumerate(checklist, start=1):
+                    lines.append(f"  {i}. {str(item)}")
+            else:
+                lines.append("checklist: -")
+            if thinking:
+                lines.append(f"domain_thinking: {thinking[:1200]}")
+            chunks.append("\n".join(lines))
+        return "\n\n".join(chunks)
+
+    @staticmethod
+    def _format_plan_steps_for_prompt(steps: list[StepSpec]) -> str:
+        if not steps:
+            return "-"
+        rows: list[str] = []
+        for s in steps:
+            rows.append(
+                f"{s.step_id}. [{s.owner_agent}] {s.step} | success_criteria: {s.success_criteria}"
+            )
+        return "\n".join(rows)
+
+    @staticmethod
+    def _format_critiques_for_prompt(critiques: list[dict[str, Any]]) -> str:
+        if not critiques:
+            return "-"
+        rows: list[str] = []
+        for idx, c in enumerate(critiques, start=1):
+            agent = str(c.get("agent", "Common"))
+            critique = str(c.get("critique", "")).strip()
+            changes = c.get("recommended_changes", [])
+            rows.append(f"[{idx}] agent={agent}")
+            rows.append(f"  critique: {critique if critique else '-'}")
+            valid_changes: list[str] = []
+            if isinstance(changes, list):
+                for change in changes:
+                    text = str(change).strip()
+                    if text:
+                        valid_changes.append(text)
+            if valid_changes:
+                rows.append("  recommended_changes:")
+                item_no = 1
+                for text in valid_changes:
+                    rows.append(f"    {item_no}. {text}")
+                    item_no += 1
+        return "\n".join(rows)
+
+    @staticmethod
+    def _format_step_for_prompt(step: StepSpec) -> str:
+        return (
+            f"step_id: {step.step_id}\n"
+            f"owner_agent: {step.owner_agent}\n"
+            f"step: {step.step}\n"
+            f"success_criteria: {step.success_criteria}"
+        )
+
+    @staticmethod
+    def _format_verifier_for_prompt(verifier: VerifierOutput) -> str:
+        return (
+            f"status: {verifier.status.value}\n"
+            f"reason: {verifier.reason}\n"
+            f"immediate_action: {verifier.immediate_action}\n"
+            f"observe_output: {verifier.observe_output[:1200]}"
+        )
+
+    @staticmethod
+    def _format_router_output_for_prompt(router_output: RouterOutput | None) -> str:
+        if router_output is None:
+            return "-"
+        selected = ", ".join(router_output.selected_agents)
+        return (
+            f"selected_agents: {selected}\n"
+            f"act_required: {router_output.act_required}\n"
+            f"route_reason: {router_output.route_reason}"
+        )
+
+    @staticmethod
+    def _format_execution_history_for_prompt(history: list[dict[str, Any]]) -> str:
+        if not history:
+            return "-"
+        rows: list[str] = []
+        for row in history:
+            sid = row.get("step_id", "")
+            owner = row.get("owner_agent", "")
+            verifier = row.get("verifier", {}) if isinstance(row, dict) else {}
+            status = verifier.get("status", "") if isinstance(verifier, dict) else ""
+            reason = verifier.get("reason", "") if isinstance(verifier, dict) else ""
+            observe = str(row.get("observe_output", ""))[:400]
+            rows.append(
+                f"step={sid} owner={owner} status={status} reason={reason}\nobserve={observe}"
+            )
+        return "\n\n".join(rows)
+
+    @staticmethod
+    def _format_context_handoff_for_prompt(
+        context_handoff: dict[str, Any] | None,
+    ) -> str:
+        if not context_handoff:
+            return "- 없음 (첫 단계)"
+        sid = context_handoff.get("previous_step_id", "")
+        status = str(context_handoff.get("previous_step_status", "")).strip()
+        reason = str(context_handoff.get("previous_step_reason", "")).strip()
+        obs = str(context_handoff.get("previous_step_observe_output", "")).strip()
+        action = str(context_handoff.get("orchestrator_instruction", "")).strip()
+        lines: list[str] = []
+        lines.append(f"1. previous_step_id: {sid if sid != '' else '-'}")
+        if status:
+            lines.append(f"2. previous_step_status: {status}")
+        if reason:
+            lines.append(
+                f"3. previous_step_reason: {MASAgent._compact_text(reason, max_chars=220)}"
+            )
+        if action:
+            lines.append("4. retry_guidance_from_orchestrator:")
+            lines.append(
+                f"   - {MASAgent._compact_text(action, max_chars=320, max_lines=3)}"
+            )
+        if obs:
+            lines.append("5. previous_step_observe_output:")
+            for row in obs[:320].splitlines():
+                text = row.strip()
+                if text:
+                    lines.append(f"   - {text}")
+        if len(lines) == 1 and "previous_step_id" in lines[0]:
+            lines.append("2. previous_step_observe_output: -")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_retry_guidance(
+        step: StepSpec,
+        verifier: VerifierOutput,
+        decision: dict[str, Any],
+    ) -> str:
+        lines: list[str] = []
+        lines.append(f"Retry step {step.step_id} in {step.owner_agent}: {step.step}")
+        reason = str(getattr(verifier, "reason", "")).strip()
+        if reason:
+            lines.append(
+                "Verifier failure reason: "
+                + MASAgent._compact_text(reason, max_chars=220)
+            )
+        instruction = str(decision.get("instruction", "")).strip()
+        if instruction:
+            lines.append(
+                "Orchestrator request: "
+                + MASAgent._compact_text(instruction, max_chars=260, max_lines=2)
+            )
+        lines.append(
+            "Regenerate code to satisfy success criteria and print explicit verification evidence in stdout."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_revision_guidance(
+        step: StepSpec,
+        verifier: VerifierOutput,
+        decision: dict[str, Any],
+    ) -> str:
+        lines: list[str] = []
+        lines.append(
+            f"Plan revised from step {step.step_id} in {step.owner_agent}: {step.step}"
+        )
+        reason = str(getattr(verifier, "reason", "")).strip()
+        if reason:
+            lines.append(
+                "Verifier revision reason: "
+                + MASAgent._compact_text(reason, max_chars=220)
+            )
+        instruction = str(decision.get("instruction", "")).strip()
+        if instruction:
+            lines.append(
+                "Orchestrator revision request: "
+                + MASAgent._compact_text(instruction, max_chars=260, max_lines=2)
+            )
+        lines.append(
+            "In the next execution code, enforce candidate filtering and print validation evidence before final matching."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _compact_text(text: str, max_chars: int = 320, max_lines: int = 2) -> str:
+        return compact_text(text=text, max_chars=max_chars, max_lines=max_lines)
+
+    @staticmethod
+    def _format_data_catalog_lines(data_catalog: list[dict[str, Any]]) -> str:
+        if not data_catalog:
+            return "-"
+        rows: list[str] = []
+        for i, row in enumerate(data_catalog, start=1):
+            name = str(row.get("name", "")).strip()
+            ext = str(row.get("ext", "")).strip()
+            size = row.get("size", 0)
+            cols = row.get("columns", [])
+            col_preview = ", ".join(str(c) for c in cols[:8])
+            rows.append(
+                f"{i}. {name} ({ext}, size={size})"
+                + (f" | columns: {col_preview}" if col_preview else "")
+            )
+        return "\n".join(rows)
+
+    @staticmethod
+    def _format_allowed_tools_for_prompt(tool_names: list[str]) -> str:
+        if not tool_names:
+            return "-"
+        return "\n".join(f"- {name}" for name in tool_names if name)
+
+    @staticmethod
+    def _format_allowed_import_map_for_prompt(
+        allowed_import_map: dict[str, set[str]],
+    ) -> str:
+        if not allowed_import_map:
+            return "-"
+        lines: list[str] = []
+        for module in sorted(allowed_import_map.keys()):
+            funcs = sorted(x for x in allowed_import_map.get(module, set()) if x)
+            if not funcs:
+                continue
+            lines.append(f"- {module}: {', '.join(funcs)}")
+        return "\n".join(lines) if lines else "-"
+
+    @staticmethod
+    def _format_required_map_for_prompt(required_map: dict[str, list[str]]) -> str:
+        if not required_map:
+            return "-"
+        lines: list[str] = []
+        for tool, reqs in required_map.items():
+            if not tool:
+                continue
+            required = ", ".join([x for x in reqs if x]) if reqs else "(none)"
+            lines.append(f"- {tool}: {required}")
+        return "\n".join(lines) if lines else "-"
+
+    def _orchestrator_exec_decide(
+        self,
+        state: MASState,
+        step: StepSpec,
+        verifier: VerifierOutput,
+        retry_count: int,
+        plan_revision_count: int,
+    ) -> dict[str, Any]:
+        section = self.prompts.orchestrator_module("Orchestrator Module 3", [])
+        max_chars = max(120, int(self.runtime.orchestrator_instruction_max_chars))
+        prompt = section + "\n\nReturn JSON only with schema: "
+        prompt += '{"action":"NEXT|RETRY|PLAN_REVISION|FULL_RESET","instruction":str,"target_step_id":int}.\n'
+        prompt += (
+            f"Instruction must be concise: <= {max_chars} chars, max 2 sentences, "
+            "no numbered list, no code block, no repeated context.\n"
+        )
+        prompt += (
+            f"Current step:\n{self._format_step_for_prompt(step)}\n"
+            f"Verifier:\n{self._format_verifier_for_prompt(verifier)}\n"
+            f"Retry count: {retry_count}\n"
+            f"Plan revision count: {plan_revision_count}\n"
+            f"Progress: {len(state.execution_history)}/{len(state.final_master_plan)}\n"
+        )
+        decision = self.llm.complete_json_strict(
+            prompt,
+            required_keys=["action", "instruction", "target_step_id"],
+            retries=self.runtime.json_retries,
+            stage=f"orchestrator_exec:{step.owner_agent}:step{step.step_id}",
+            validator=lambda d: (
+                str(d.get("action", ""))
+                in {"NEXT", "RETRY", "PLAN_REVISION", "FULL_RESET"}
+                and isinstance(d.get("instruction", ""), str)
+            ),
+        )
+        raw_instruction = str(decision.get("instruction", "")).strip()
+        final_instruction = raw_instruction
+        if self.runtime.orchestrator_instruction_postprocess:
+            final_instruction = self._compact_text(
+                raw_instruction,
+                max_chars=max_chars,
+                max_lines=2,
+            )
+        action = str(decision.get("action", ""))
+        if action == "RETRY" and self._should_escalate_failure_to_plan_revision(
+            step=step,
+            verifier=verifier,
+            retry_count=retry_count,
+            execution_history=state.execution_history,
+        ):
+            action = "PLAN_REVISION"
+            decision["source"] = "orchestrator_escalation"
+        return {
+            "action": action,
+            "instruction": final_instruction,
+            "target_step_id": int(
+                self._coerce_int(decision.get("target_step_id")) or step.step_id
+            ),
+            "source": str(decision.get("source", "")),
+        }
+
+    def _verify_step(
+        self, step: StepSpec, code: str, observe_output: str
+    ) -> VerifierOutput:
+        section = self.prompts.domain_round("2 Round - Verifier", [])
+        profile = self.domain_profiles.get(step.owner_agent, {})
+        runtime_hint = ""
+        if "Error:" in observe_output or "ERROR:" in observe_output:
+            runtime_hint = "Runtime error marker detected in observation."
+        prompt = (
+            self._inject_prompt(
+                section,
+                {
+                    "domain": step.owner_agent,
+                    "domain_description": str(profile.get("description", "")),
+                    "domain_functions": self._format_domain_functions(
+                        profile.get("functions", [])
+                    ),
+                    "assigned_step_description": step.step,
+                    "success_criteria": step.success_criteria,
+                    "executed_code": code,
+                    "observation_output": observe_output,
+                },
+            )
+            + f"\n\nAdditional runtime hint: {runtime_hint}"
+        )
+        payload = self.llm.complete_json_strict(
+            prompt,
+            required_keys=["status", "reason", "immediate_action"],
+            retries=self.runtime.json_retries,
+            validator=lambda d: str(d.get("status", ""))
+            in {"SUCCESS", "FAILURE", "PLAN_REVISION"},
+            stage=f"verifier:{step.owner_agent}:step{step.step_id}",
+        )
+        user_interaction_blocker = self._is_user_interaction_required_step(
+            step.step, step.success_criteria
+        ) or self._is_user_reprompt_output(observe_output)
+        if user_interaction_blocker:
+            payload["status"] = "PLAN_REVISION"
+            payload["reason"] = (
+                "Current step requires additional user response/clarification, "
+                "which is incompatible with single-turn automated execution."
+            )
+            payload["immediate_action"] = (
+                "Revise plan to remove user-input collection step; execute directly "
+                "with available case description and resources."
+            )
+        if str(
+            payload.get("status", "")
+        ) == "PLAN_REVISION" and self._is_retryable_data_mapping_issue(
+            reason=str(payload.get("reason", "")),
+            immediate_action=str(payload.get("immediate_action", "")),
+            observe_output=observe_output,
+        ):
+            payload["status"] = "FAILURE"
+            payload["reason"] = (
+                "Data/schema mapping issue should be handled with step retry before plan revision"
+            )
+            payload["immediate_action"] = (
+                "Fix schema/column mapping or missing-value handling and retry this step."
+            )
+        if (
+            ("Error:" in observe_output or "ERROR:" in observe_output)
+            and str(payload.get("status", "")) == "PLAN_REVISION"
+            and not user_interaction_blocker
+        ):
+            payload["status"] = "FAILURE"
+            payload["reason"] = "Runtime execution error must be FAILURE by policy"
+            payload["immediate_action"] = "retry same step"
+        return VerifierOutput(
+            status=VerifierStatus(str(payload["status"])),
+            reason=str(payload["reason"]),
+            immediate_action=str(payload["immediate_action"]),
+            observe_output=str(payload.get("observe_output", observe_output)),
+        )
+
+    def _synthesize_no_act(self, state: MASState) -> str:
+        return f"No ACT path selected. Query answered directly: {state.user_query}"
+
+    def _synthesize_act(self, state: MASState, last_output: str) -> str:
+        history = state.execution_history
+        if not history:
+            return str(last_output or "")[: self.runtime.observation_max_chars]
+
+        success = 0
+        failure = 0
+        revision = 0
+        for row in history:
+            status = str(row.get("verifier", {}).get("status", "")).strip().upper()
+            if status == "SUCCESS":
+                success += 1
+            elif status == "FAILURE":
+                failure += 1
+            elif status == "PLAN_REVISION":
+                revision += 1
+
+        lines = [
+            "Execution evidence summary:",
+            (
+                f"- steps_executed={len(history)}, success={success}, "
+                f"failure={failure}, plan_revision={revision}"
+            ),
+        ]
+
+        for row in history[-5:]:
+            verifier = row.get("verifier", {})
+            status = str(verifier.get("status", "")).strip().upper() or "UNKNOWN"
+            reason = self._compact_text(
+                str(verifier.get("reason", "")).strip(),
+                max_chars=180,
+                max_lines=1,
+            )
+            observed = self._compact_text(
+                str(row.get("observe_output", "")).strip(),
+                max_chars=260,
+                max_lines=3,
+            )
+            step_id = row.get("step_id", "-")
+            owner_agent = str(row.get("owner_agent", "Common")).strip() or "Common"
+            lines.append(
+                (
+                    f"- step={step_id} owner={owner_agent} status={status} "
+                    f"reason={reason or '-'} output={observed or '-'}"
+                )
+            )
+
+        if last_output:
+            lines.append(
+                f"- latest_observation={self._compact_text(str(last_output), max_chars=260, max_lines=3)}"
+            )
+
+        return "\n".join(lines)[: self.runtime.observation_max_chars]
+
+    def _synthesize_final(
+        self,
+        state: MASState,
+        mode: str,
+        execution_answer: str,
+    ) -> str:
+        if mode == "no_act":
+            prompt = "\n".join(
+                [
+                    "You are Synthesizer Agent.",
+                    "mode=no_act",
+                    "input.user_query:",
+                    state.user_query,
+                    "output.final_answer:",
+                    "Return only the final answer text.",
+                    "Follow explicit output format constraints from the user exactly.",
+                    "Do not mention internal pipeline state, router output, logs, or process details.",
+                ]
+            )
+        else:
+            prompt_lines = [
+                "You are Synthesizer Agent.",
+                "Return only the final answer to user_query.",
+                "Follow explicit format constraints from the user (for example sentence count).",
+                "Do not include caveats, reasoning, process notes, limitation notes, or internal system details.",
+                "Do not mention router/plan/execution/debug/log/error context unless explicitly requested by the user.",
+                f"mode={mode}",
+                f"user_query={state.user_query}",
+            ]
+            if execution_answer:
+                prompt_lines.append(f"execution_result={execution_answer}")
+            prompt = "\n".join(prompt_lines) + "\n"
+        stage = "synth_no_act" if mode == "no_act" else "synth_act"
+        text = self.llm.complete(prompt, stage=stage).text.strip()
+        if not text:
+            raise RuntimeError("Synthesizer returned empty response")
+        return text
+
+    @staticmethod
+    def _should_force_act_for_decision_query(query: str) -> bool:
+        q = str(query).lower()
+        decision_tokens = (
+            "most relevant",
+            "select one",
+            "choose one",
+            "from the options",
+            "options below",
+        )
+        option_style = ("a.", "b.", "c.", "d.", "e.", "f.")
+        bio_tokens = (
+            "crispr",
+            "primary cell",
+            "t-cell",
+            "gene",
+            "delivery method",
+            "electroporation",
+            "aav",
+            "lnp",
+        )
+        has_decision = any(t in q for t in decision_tokens)
+        has_options = sum(1 for t in option_style if t in q) >= 3
+        has_bio = any(t in q for t in bio_tokens)
+        return has_decision and has_options and has_bio
+
+    def _partial_replan(
+        self,
+        state: MASState,
+        target_step_id: int,
+        reason: str,
+        immediate_action: str,
+        stream: bool,
+    ) -> bool:
+        selected_agents = (
+            state.router_output.selected_agents if state.router_output else []
+        )
+        if not selected_agents:
+            return False
+        domain_r2_outputs: list[dict[str, Any]] = []
+        domain_r3_outputs: list[dict[str, Any]] = []
+        use_r1 = self._needs_replan_r1(reason, immediate_action)
+        preserved_prefix = state.final_master_plan[: max(0, target_step_id - 1)]
+        revision_instruction = (
+            f"reason={reason}\n"
+            f"immediate_action={immediate_action}\n"
+            f"target_step_id={target_step_id}\n"
+            f"preserve_prefix_steps:\n{self._format_plan_steps_for_prompt(preserved_prefix)}"
+        )
+        for domain in selected_agents:
+            runtime_ctx = self.domain_runtime.get(domain, {})
+            r1 = runtime_ctx.get("r1")
+            if r1 is None or use_r1:
+                r1 = self._plan_r1(domain, state.user_query)
+            r2 = self._plan_r2(
+                domain,
+                state.user_query,
+                r1,
+                revision_instruction=revision_instruction,
+            )
+            domain_r2_outputs.append({"domain": domain, **r2})
+        draft = self._orchestrator_r21(domain_r2_outputs, state.user_query)
+        for domain in selected_agents:
+            critique = self._plan_r3(domain, draft, state.user_query)
+            domain_r3_outputs.append({"agent": domain, **critique})
+        revised = self._orchestrator_r31(
+            draft,
+            domain_r3_outputs,
+            query=state.user_query,
+            allowed_owners=set(selected_agents) | {"Common"},
+        )
+
+        prefix = [
+            StepSpec(
+                step_id=x.step_id,
+                step=x.step,
+                owner_agent=x.owner_agent,
+                success_criteria=x.success_criteria,
+            )
+            for x in preserved_prefix
+        ]
+        tail_start = max(0, target_step_id - 1)
+        if len(revised) < len(prefix):
+            preserve_count = min(len(prefix), max(0, len(revised) - 1))
+            prefix = prefix[:preserve_count]
+            tail_start = preserve_count
+        tail = revised[tail_start:]
+        if not tail:
+            return False
+        for i, step in enumerate(prefix + tail, start=1):
+            step.step_id = i
+        state.final_master_plan = prefix + tail
+        state.replan_history.append(
+            {
+                "target_step": self._safe_target_step(state, target_step_id),
+                "reason": reason,
+                "immediate_action": immediate_action,
+                "replan_entry": "R1" if use_r1 else "R2",
+                "applied": True,
+                "preserved_prefix_steps": len(prefix),
+                "new_tail_steps": len(tail),
+            }
+        )
+        self._emit(
+            state,
+            "[Plan Revision Message]",
+            f"target_step={target_step_id}, new_tail_steps={len(tail)}",
+            None,
+            stream,
+        )
+        return True
+
+    def _ensure_data_lake(self, state: MASState, domain: str, stream: bool) -> None:
+        runtime_ctx = self.domain_runtime.get(domain, {})
+        resolved = runtime_ctx.get("resolved", {})
+        selected = resolved.get("data_lake", [])
+        names = [
+            str(x.get("name", "")).strip()
+            for x in selected
+            if str(x.get("name", "")).strip()
+        ]
+        if not names:
+            return
+        self.paths.data_lake_root.mkdir(parents=True, exist_ok=True)
+        missing = [n for n in names if not (self.paths.data_lake_root / n).exists()]
+        if not missing:
+            return
+        if not self.runtime.s3_bucket_url:
+            state.replan_history.append(
+                {
+                    "target_step": self._safe_target_step(
+                        state, state.current_step_index
+                    ),
+                    "reason": "MAS_S3_BUCKET_URL is empty",
+                    "applied": False,
+                    "note": "data_lake_missing_s3_url",
+                    "domain": domain,
+                    "missing_files": missing,
+                }
+            )
+            self._emit(
+                state,
+                "[Data Lake Message]",
+                f"domain={domain}, missing={len(missing)}, download skipped: empty MAS_S3_BUCKET_URL",
+                {
+                    "domain": domain,
+                    "missing_files": missing,
+                    "reason": "empty_s3_bucket_url",
+                },
+                stream,
+            )
+            return
+        try:
+            result = ensure_data_lake_files(
+                missing,
+                data_lake_root=self.paths.data_lake_root,
+                s3_bucket_url=self.runtime.s3_bucket_url,
+                folder="data_lake",
+            )
+        except Exception as exc:
+            state.replan_history.append(
+                {
+                    "target_step": self._safe_target_step(
+                        state, state.current_step_index
+                    ),
+                    "reason": str(exc),
+                    "applied": False,
+                    "note": "data_lake_download_exception",
+                    "domain": domain,
+                    "missing_files": missing,
+                }
+            )
+            self._emit(
+                state,
+                "[Data Lake Message]",
+                f"domain={domain}, missing={len(missing)}, download error: {exc}",
+                {
+                    "domain": domain,
+                    "missing_files": missing,
+                    "error": str(exc),
+                },
+                stream,
+            )
+            return
+
+        failed = sorted([name for name, ok in result.items() if not bool(ok)])
+        if failed:
+            state.replan_history.append(
+                {
+                    "target_step": self._safe_target_step(
+                        state, state.current_step_index
+                    ),
+                    "reason": "Some data lake files failed to download",
+                    "applied": False,
+                    "note": "data_lake_partial_download_failure",
+                    "domain": domain,
+                    "missing_files": missing,
+                    "failed_files": failed,
+                }
+            )
+            self._emit(
+                state,
+                "[Data Lake Message]",
+                (f"domain={domain}, requested={len(missing)}, failed={len(failed)}"),
+                {
+                    "domain": domain,
+                    "missing_files": missing,
+                    "failed_files": failed,
+                },
+                stream,
+            )
+
+    def _result(
+        self, state: MASState, final_answer: str, show_trace: bool
+    ) -> dict[str, Any]:
+        step_totals = [
+            float(row.get("step_total_ms", 0.0))
+            for row in state.execution_history
+            if isinstance(row, dict)
+            and isinstance(row.get("step_total_ms", None), (int, float))
+        ]
+        step_totals_sorted = sorted(step_totals)
+        p95 = 0.0
+        if step_totals_sorted:
+            idx = max(0, int((len(step_totals_sorted) - 1) * 0.95))
+            p95 = step_totals_sorted[idx]
+        step_latency_summary = {
+            "steps_measured": len(step_totals_sorted),
+            "step_total_ms_mean": (sum(step_totals_sorted) / len(step_totals_sorted))
+            if step_totals_sorted
+            else 0.0,
+            "step_total_ms_p95": p95,
+        }
+        base = {
+            "final_answer": final_answer,
+            "router_output": asdict(state.router_output)
+            if state.router_output
+            else None,
+            "final_master_plan": [asdict(x) for x in state.final_master_plan],
+            "execution_history": state.execution_history,
+            "replan_history": state.replan_history,
+            "current_state": state.current_state.value,
+            "state_transition_history": state.state_transition_history,
+            "token_usage_by_stage": state.token_usage_by_stage,
+            "token_usage_total": state.token_usage_total,
+            "query_to_final_ms": int(state.query_to_final_ms),
+            "retry_count": int(state.retry_count),
+            "plan_revision_count": int(state.plan_revision_count),
+            "full_reset_count": int(state.full_reset_count),
+            "step_latency_summary": step_latency_summary,
+        }
+        if show_trace:
+            base["messages"] = [asdict(x) for x in state.messages]
+        return base
+
+    def _sync_token_usage(self, state: MASState) -> None:
+        usage = self.llm.get_usage_snapshot()
+        state.token_usage_by_stage = usage.get("by_stage", {})
+        state.token_usage_total = usage.get(
+            "total", {"input": 0, "output": 0, "total": 0}
+        )
+
+    def _load_domain_profiles(self) -> dict[str, dict[str, Any]]:
+        fp = self.paths.resource_index_root / "domain_profiles.json"
+        if not fp.exists():
+            return {}
+        return json.loads(fp.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _inject_prompt(template: str, values: dict[str, Any]) -> str:
+        return inject_prompt(template=template, values=values)
+
+    @staticmethod
+    def _prune_empty_prompt_lines(text: str) -> str:
+        return prune_empty_prompt_lines(text)
+
+    def _set_state(self, state: MASState, next_state: WorkflowState) -> None:
+        state.current_state = next_state
+        state.state_transition_history.append(next_state.value)
+
+    def _safe_target_step(self, state: MASState, value: Any) -> int:
+        plan_len = len(state.final_master_plan)
+        parsed = self._coerce_int(value)
+        if parsed is None or parsed <= 0:
+            parsed = self._coerce_int(state.current_step_index)
+        if parsed is None or parsed <= 0:
+            parsed = 1
+        if plan_len > 0:
+            return max(1, min(parsed, plan_len))
+        return max(1, parsed)
+
+    @staticmethod
+    def _needs_replan_r1(reason: str, immediate_action: str) -> bool:
+        t = f"{reason}\n{immediate_action}".lower()
+        reselection = (
+            "reselect" in t
+            or "resel" in t
+            or "재선정" in t
+            or "미선정" in t
+            or "잘못된 선정" in t
+            or "round 1" in t
+            or "r1" in t
+        )
+        resource_issue = (
+            "resource" in t
+            or "리소스" in t
+            or "tool" in t
+            or "library" in t
+            or "data" in t
+            or "dataset" in t
+        )
+        availability_issue = (
+            "missing" in t
+            or "unavailable" in t
+            or "not found" in t
+            or "누락" in t
+            or "없음" in t
+        )
+        return reselection or (resource_issue and availability_issue)
+
+    @staticmethod
+    def _validate_owner_agent(owner_agent: str, allowed: set[str]) -> str:
+        owner = owner_agent.strip()
+        if not owner:
+            raise RuntimeError("owner_agent must be non-empty")
+        if owner not in DOMAINS:
+            raise RuntimeError(f"owner_agent is not in supported domains: {owner}")
+        if owner not in allowed:
+            raise RuntimeError(f"owner_agent is not allowed by current route: {owner}")
+        return owner
+
+    @staticmethod
+    def _resolve_owner_agent(owner_agent: str, allowed: set[str]) -> str:
+        owner = owner_agent.strip()
+        if not owner:
+            return "Common" if "Common" in allowed else sorted(allowed)[0]
+        domain_by_lower = {d.lower(): d for d in DOMAINS}
+        canonical = domain_by_lower.get(owner.lower(), owner)
+        if canonical in allowed and canonical in DOMAINS:
+            return canonical
+
+        if canonical == "Genomics" and "Genetics" in allowed:
+            return "Genetics"
+        if canonical == "Genetics" and "Genomics" in allowed:
+            return "Genomics"
+
+        if "Common" in allowed:
+            return "Common"
+        for domain in DOMAINS:
+            if domain in allowed:
+                return domain
+        return canonical if canonical in DOMAINS else "Common"
+
+    @staticmethod
+    def _is_full_reset_exception(reason: str) -> bool:
+        t = reason.lower()
+        return (
+            "핵심 입력 데이터" in reason
+            or "오염" in reason
+            or ("input" in t and "data" in t and ("missing" in t or "corrupt" in t))
+            or "잘못된 도메인 라우팅" in reason
+            or ("route" in t and "invalid" in t)
+            or "안전" in reason
+            or "윤리" in reason
+            or "정책 위반" in reason
+            or "safety" in t
+            or "policy violation" in t
+        )
+
+    @staticmethod
+    def _is_retryable_data_mapping_issue(
+        reason: str,
+        immediate_action: str,
+        observe_output: str,
+    ) -> bool:
+        text = "\n".join(
+            [
+                str(reason or "").lower(),
+                str(immediate_action or "").lower(),
+                str(observe_output or "").lower(),
+            ]
+        )
+        keywords = [
+            "schema",
+            "column",
+            "columns",
+            "mapping",
+            "normalize",
+            "normalization",
+            "identifier",
+            "field",
+            "missing value",
+            "none",
+            "nan",
+            "not in index",
+            "dtype",
+            "형식",
+            "스키마",
+            "컬럼",
+            "매핑",
+            "정규화",
+            "식별자",
+            "결측",
+            "누락",
+        ]
+        return any(k in text for k in keywords)
+
+    @staticmethod
+    def _is_schema_identifier_mismatch_issue(
+        reason: str,
+        immediate_action: str,
+        observe_output: str,
+    ) -> bool:
+        text = "\n".join(
+            [
+                str(reason or "").lower(),
+                str(immediate_action or "").lower(),
+                str(observe_output or "").lower(),
+            ]
+        )
+        runtime_error_markers = [
+            "runtime error",
+            "syntaxerror",
+            "typeerror",
+            "valueerror",
+            "keyerror",
+            "importerror",
+            "modulenotfounderror",
+            "filenotfounderror",
+            "permission denied",
+            "can only use .str accessor",
+            "traceback",
+            "error:",
+        ]
+        if any(k in text for k in runtime_error_markers):
+            return False
+        mismatch_markers = [
+            "no matching",
+            "matching hela",
+            "sample column",
+            "column name",
+            "identifier mismatch",
+            "id mapping",
+            "schema mismatch",
+            "axis",
+            "header",
+            "column",
+            "modelid",
+            "depmap_id",
+            "not found as a column",
+            "column not found",
+        ]
+        return any(k in text for k in mismatch_markers)
+
+    def _should_escalate_failure_to_plan_revision(
+        self,
+        step: StepSpec,
+        verifier: VerifierOutput,
+        retry_count: int,
+        execution_history: list[dict[str, Any]],
+    ) -> bool:
+        if verifier.status != VerifierStatus.FAILURE:
+            return False
+        if not self._is_schema_identifier_mismatch_issue(
+            reason=verifier.reason,
+            immediate_action=verifier.immediate_action,
+            observe_output=verifier.observe_output,
+        ):
+            return False
+        if retry_count >= 1:
+            return True
+        current_reason = " ".join(str(verifier.reason).lower().split())
+        for row in reversed(execution_history):
+            if not isinstance(row, dict):
+                continue
+            if int(row.get("step_id", -1)) != int(step.step_id):
+                continue
+            prev_verifier = row.get("verifier", {})
+            if not isinstance(prev_verifier, dict):
+                continue
+            if (
+                str(prev_verifier.get("status", "")).upper()
+                != VerifierStatus.FAILURE.value
+            ):
+                continue
+            prev_reason = " ".join(str(prev_verifier.get("reason", "")).lower().split())
+            if prev_reason and prev_reason == current_reason:
+                return True
+        return False
+
+    def _emit(
+        self,
+        state: MASState,
+        label: str,
+        content: str,
+        data: dict[str, Any] | None,
+        stream: bool,
+    ) -> None:
+        event = MessageEvent(label=label, content=content, data=data)
+        state.messages.append(event)
+        stage_snapshot = {}
+        if hasattr(self.llm, "get_last_stage_usage_snapshot"):
+            stage_snapshot = self.llm.get_last_stage_usage_snapshot() or {}
+        usage = stage_snapshot.get("usage", {})
+        if isinstance(usage, dict):
+            in_tok = int(usage.get("input", 0))
+            out_tok = int(usage.get("output", 0))
+            total_tok = int(usage.get("total", in_tok + out_tok))
+        else:
+            in_tok = 0
+            out_tok = 0
+            total_tok = 0
+        callback_payload = {
+            "label": label,
+            "content": content,
+            "data": data,
+            "workflow_state": state.current_state.value,
+            "stage": str(stage_snapshot.get("stage", "")).strip(),
+            "token_usage": {
+                "input": in_tok,
+                "output": out_tok,
+                "total": total_tok,
+            },
+        }
+        if self.event_callback is not None:
+            try:
+                self.event_callback(callback_payload)
+            except Exception:
+                pass
+        if stream:
+            stage = str(stage_snapshot.get("stage", "")).strip()
+            print(
+                f"{label} {content} "
+                f"(stage: {stage or '-'}, input token: {in_tok}, output token: {out_tok}, total token: {total_tok})"
+            )
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        return coerce_int(value)
+
+    @staticmethod
+    def _to_int_list(value: Any) -> list[int]:
+        return to_int_list(value)
+
+    @staticmethod
+    def _indices_or_ids_to_ids(
+        selected: list[int], items: list[dict[str, Any]]
+    ) -> list[int]:
+        # R1 prompt shows local indices (0..n-1). Convert to stable resource IDs.
+        # Keep compatibility if model occasionally returns IDs directly.
+        return indices_or_ids_to_ids(selected=selected, items=items)
+
+    @staticmethod
+    def _short_desc_with_index(items: list[dict[str, Any]], limit: int = 25) -> str:
+        lines: list[str] = []
+        for i, x in enumerate(items[:limit]):
+            name = str(x.get("name", "")).strip()
+            desc = str(x.get("short_description", "")).strip()
+            lines.append(f"{i}: {name} | {desc}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _short_desc(items: list[dict[str, Any]], limit: int = 25) -> str:
+        lines: list[str] = []
+        for x in items[:limit]:
+            rid = x.get("id", "")
+            name = str(x.get("name", "")).strip()
+            desc = str(x.get("short_description", "")).strip()
+            lines.append(f"{rid}: {name} | {desc}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _short_desc_no_id(items: list[dict[str, Any]], limit: int = 25) -> str:
+        lines: list[str] = []
+        for x in items[:limit]:
+            name = str(x.get("name", "")).strip()
+            desc = str(x.get("short_description", "")).strip()
+            lines.append(f"{name} | {desc}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_resources_for_plan_prompt(
+        items: list[dict[str, Any]],
+        include_index: bool = True,
+        include_id: bool = False,
+        limit: int = 25,
+    ) -> str:
+        if not items:
+            return "-"
+        lines: list[str] = []
+        for i, row in enumerate(items[:limit]):
+            name = str(row.get("name", "")).strip() or "(unnamed)"
+            short = str(row.get("short_description", "")).strip()
+            full = str(row.get("description", "")).strip()
+            desc = short or full or "-"
+            prefix = f"{i}." if include_index else "-"
+            lines.append(f"{prefix} {name}")
+            lines.append(f"   - description: {desc}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_plan_optional_section(title: str, body: str) -> str:
+        body_text = str(body or "").strip()
+        if not body_text or body_text == "-":
+            return ""
+        return f"{title}:\n{body_text}"
+
+    def _build_tool_bindings(
+        self,
+        domain: str,
+        tools: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        del domain
+        rows: list[dict[str, Any]] = []
+        for tool in tools:
+            name = str(tool.get("name", "")).strip()
+            rel_path = str(tool.get("tool_file", "")).strip()
+            if not name or not rel_path:
+                continue
+            rows.append(
+                {
+                    "name": name,
+                    "short_description": str(tool.get("short_description", "")).strip(),
+                    "required_parameters": tool.get("required_parameters", []),
+                    "optional_parameters": tool.get("optional_parameters", []),
+                    "tool_file": rel_path,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _format_tool_specs_for_exec_prompt(
+        tool_bindings: list[dict[str, Any]],
+        limit: int = 80,
+    ) -> str:
+        if not tool_bindings:
+            return "-"
+        lines: list[str] = []
+        for i, row in enumerate(tool_bindings[:limit], start=1):
+            name = str(row.get("name", "")).strip()
+            desc = str(row.get("short_description", "")).strip()
+            required = row.get("required_parameters", [])
+            optional = row.get("optional_parameters", [])
+            lines.append(f"{i}. {name}")
+            lines.append(f"   - description: {desc if desc else '-'}")
+            lines.append("   - required_parameters:")
+            req_count = 0
+            if isinstance(required, list):
+                for p in required:
+                    if not isinstance(p, dict):
+                        continue
+                    pn = str(p.get("name", "")).strip()
+                    pt = str(p.get("type", "")).strip()
+                    pd = str(p.get("description", "")).strip()
+                    if not pn:
+                        continue
+                    req_count += 1
+                    lines.append(
+                        f"     - {pn} ({pt if pt else 'any'}): {pd if pd else '-'}"
+                    )
+            if req_count == 0:
+                lines.append("     - (none)")
+            lines.append("   - optional_parameters:")
+            opt_count = 0
+            if isinstance(optional, list):
+                for p in optional:
+                    if not isinstance(p, dict):
+                        continue
+                    pn = str(p.get("name", "")).strip()
+                    pt = str(p.get("type", "")).strip()
+                    pd = str(p.get("description", "")).strip()
+                    dv = p.get("default", None)
+                    if not pn:
+                        continue
+                    opt_count += 1
+                    lines.append(
+                        f"     - {pn} ({pt if pt else 'any'}, default={dv}): {pd if pd else '-'}"
+                    )
+            if opt_count == 0:
+                lines.append("     - (none)")
+            lines.append(f"   - source: {row.get('tool_file', '')}")
+            if i < min(limit, len(tool_bindings)):
+                lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_data_resources_for_exec_prompt(
+        items: list[dict[str, Any]], limit: int = 80
+    ) -> str:
+        if not items:
+            return "-"
+
+        def _clean(text: Any) -> str:
+            return " ".join(str(text or "").split()).strip()
+
+        lines: list[str] = []
+        for i, x in enumerate(items[:limit], start=1):
+            src = _clean(x.get("source_file", ""))
+            raw_name = _clean(x.get("name", ""))
+            fallback_name = Path(src).name if src else ""
+            name = raw_name or fallback_name or "(unnamed_data)"
+            desc = (
+                _clean(x.get("description", ""))
+                or _clean(x.get("short_description", ""))
+                or "-"
+            )
+            lines.append(f"{i}. {name}")
+            lines.append(f"   - description: {desc if desc else '-'}")
+            if i < min(limit, len(items)):
+                lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_library_resources_for_exec_prompt(
+        items: list[dict[str, Any]], limit: int = 80
+    ) -> str:
+        if not items:
+            return "-"
+
+        def _clean(text: Any) -> str:
+            return " ".join(str(text or "").split()).strip()
+
+        lines: list[str] = []
+        for i, x in enumerate(items[:limit], start=1):
+            src = _clean(x.get("source_file", ""))
+            raw_name = _clean(x.get("name", ""))
+            fallback_name = Path(src).name if src else ""
+            name = raw_name or fallback_name or "(unnamed_library)"
+            desc = (
+                _clean(x.get("description", ""))
+                or _clean(x.get("short_description", ""))
+                or "-"
+            )
+            lines.append(f"{i}. {name}")
+            lines.append(f"   - description: {desc if desc else '-'}")
+            if src:
+                lines.append(f"   - source: {src}")
+            if i < min(limit, len(items)):
+                lines.append("")
+        return "\n".join(lines)
+
+    def _load_tool_scope(self, domain: str) -> dict[str, Any]:
+        runtime_ctx = self.domain_runtime.get(domain, {})
+        tools = self._build_tool_bindings(
+            domain, runtime_ctx.get("resolved", {}).get("tools", [])
+        )
+        scope: dict[str, Any] = {}
+        loaded_modules: dict[str, Any] = {}
+        failed_modules: dict[str, str] = {}
+        load_errors: list[str] = []
+        for tool in tools:
+            name = str(tool.get("name", "")).strip()
+            rel_path = str(tool.get("tool_file", "")).strip()
+            if not name or not rel_path:
+                continue
+            if rel_path in failed_modules:
+                load_errors.append(f"{name}({rel_path}): {failed_modules[rel_path]}")
+                continue
+            abs_path = self.paths.repo_root / rel_path
+            if not abs_path.exists():
+                err = "tool module file not found"
+                failed_modules[rel_path] = err
+                load_errors.append(f"{name}({rel_path}): {err}")
+                continue
+            module = loaded_modules.get(rel_path)
+            if module is None:
+                spec = importlib.util.spec_from_file_location(abs_path.stem, abs_path)
+                if spec is None or spec.loader is None:
+                    err = "failed to build module spec"
+                    failed_modules[rel_path] = err
+                    load_errors.append(f"{name}({rel_path}): {err}")
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                try:
+                    spec.loader.exec_module(module)
+                except Exception as exc:
+                    failed_modules[rel_path] = str(exc)
+                    load_errors.append(f"{name}({rel_path}): {exc}")
+                    continue
+                loaded_modules[rel_path] = module
+            fn = getattr(module, name, None)
+            if callable(fn):
+                scope[name] = fn
+            else:
+                load_errors.append(
+                    f"{name}({rel_path}): callable '{name}' not found in module"
+                )
+        if load_errors:
+            summary = "; ".join(load_errors[:4])
+            if len(load_errors) > 4:
+                summary += f"; ... (+{len(load_errors) - 4} more)"
+            return {
+                "__tool_scope_error__": (
+                    f"Tool scope load failed for domain '{domain}': {summary}"
+                )
+            }
+        return scope
+
+    @staticmethod
+    def _missing_tool_stub(
+        name: str,
+        domain: str,
+        rel_path: str,
+        error: str,
+    ):
+        def _stub(*args: Any, **kwargs: Any) -> str:
+            del args, kwargs
+            return (
+                f"Tool '{name}' is unavailable in domain '{domain}'. "
+                f"module='{rel_path}'. load_error='{error}'. "
+                "Install missing dependency and retry."
+            )
+
+        _stub.__name__ = name
+        return _stub
+
+    def _build_data_catalog(self, domain: str) -> list[dict[str, Any]]:
+        runtime_ctx = self.domain_runtime.get(domain, {})
+        selected = runtime_ctx.get("resolved", {}).get("data_lake", [])
+        root = self.paths.data_lake_root
+        root.mkdir(parents=True, exist_ok=True)
+        catalog: list[dict[str, Any]] = []
+        for item in selected:
+            nm = str(item.get("name", "")).strip()
+            if not nm:
+                continue
+            f = root / nm
+            ext = f.suffix.lower() if f.exists() else Path(nm).suffix.lower()
+            size = f.stat().st_size if f.exists() and f.is_file() else 0
+            row: dict[str, Any] = {
+                "path": str(f),
+                "name": f.name if f.exists() else Path(nm).name,
+                "ext": ext,
+                "size": size,
+                "columns": [],
+            }
+            if f.exists() and f.is_file() and ext in {".csv", ".tsv"}:
+                try:
+                    with f.open("r", encoding="utf-8", errors="ignore") as fp:
+                        header = fp.readline().strip()
+                        sep = "," if ext == ".csv" else "\t"
+                        row["columns"] = [
+                            x.strip() for x in header.split(sep) if x.strip()
+                        ]
+                except Exception:
+                    pass
+            catalog.append(row)
+        return catalog
+
+    @staticmethod
+    def _extract_execute_block_with_reason(text: str) -> tuple[bool, str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return False, "empty_response"
+        matches = re.findall(r"<execute>([\s\S]*?)</execute>", raw, flags=re.IGNORECASE)
+        if len(matches) != 1:
+            return False, "execute_block_count_not_one"
+        code = str(matches[0]).strip()
+        if not code:
+            return False, "execute_block_empty"
+        return True, code
+
+    @staticmethod
+    def _validate_exec_code_with_reason(
+        code: str,
+        allowed_tool_names: set[str] | None = None,
+        allowed_import_map: dict[str, set[str]] | None = None,
+    ) -> tuple[bool, str]:
+        del allowed_import_map
+        src = str(code or "")
+        if re.search(r"(?m)\b(?:raw_input|input)\s*\(", src):
+            return False, "forbidden_interactive_input"
+        if re.search(r"(?m)^\s*from\s+tools\s+import\s+", src):
+            return False, "forbidden_import_from_tools"
+        if re.search(r"(?m)^\s*import\s+tools\b", src):
+            return False, "forbidden_import_tools_module"
+        if re.search(r"(?m)^\s*from\s+mas_tools(\.|\\b)", src):
+            return False, "forbidden_import_from_mas_tools"
+        if re.search(r"(?m)^\s*import\s+mas_tools(\.|\\b)?", src):
+            return False, "forbidden_import_mas_tools_module"
+        if re.search(r"(?m)(['\"])\/Users\/[^'\"]+\1", src):
+            return False, "forbidden_absolute_local_path"
+        if re.search(r"(?m)(['\"])\.\./data_lake(?:/[^'\"]*)?\1", src):
+            return False, "forbidden_parent_data_lake_path"
+        if MASAgent._is_user_reprompt_code(src):
+            return False, "forbidden_user_reprompt_only_flow"
+        return True, "ok"
+
+    @staticmethod
+    def _is_user_interaction_required_step(
+        step_text: str, success_criteria: str
+    ) -> bool:
+        text = f"{step_text}\n{success_criteria}".lower()
+        keywords = (
+            "request additional",
+            "ask user",
+            "사용자에게",
+            "사용자 응답",
+            "single response",
+            "추가 정보",
+            "재요청",
+            "clarification",
+        )
+        return any(k in text for k in keywords)
+
+    @staticmethod
+    def _is_user_reprompt_output(observe_output: str) -> bool:
+        t = str(observe_output or "").lower()
+        return (
+            "desired_edit_type" in t
+            and "need_for_stable_integration" in t
+            and "selection_marker_and_cloning_plan" in t
+            and "experiment_scale" in t
+        )
+
+    @staticmethod
+    def _is_user_reprompt_code(src: str) -> bool:
+        t = str(src or "").lower()
+        has_fields = (
+            "desired_edit_type" in t
+            and "need_for_stable_integration" in t
+            and "selection_marker_and_cloning_plan" in t
+            and "experiment_scale" in t
+        )
+        reprompt_tokens = (
+            "request_fields",
+            "requested_fields",
+            "final_user_input_fields",
+            "ask user",
+            "additional details",
+        )
+        has_reprompt = any(k in t for k in reprompt_tokens)
+        return has_fields and has_reprompt
+
+    @staticmethod
+    def _looks_like_data_parsing_only(src: str) -> bool:
+        t = str(src or "").lower()
+        data_tokens = ("read_parquet", "read_csv", "pandas", "pd.")
+        return any(k in t for k in data_tokens)
+
+    @staticmethod
+    def _validate_calls_json(
+        payload: dict[str, Any],
+        allowed_tools: set[str],
+        required_map: dict[str, list[str]],
+    ) -> bool:
+        ok, _ = MASAgent._validate_calls_json_with_reason(
+            payload, allowed_tools, required_map
+        )
+        return ok
+
+    @staticmethod
+    def _validate_calls_json_with_reason(
+        payload: dict[str, Any],
+        allowed_tools: set[str],
+        required_map: dict[str, list[str]],
+    ) -> tuple[bool, str]:
+        calls = payload.get("calls")
+        if not isinstance(calls, list) or not calls:
+            return False, "calls_empty"
+        for row in calls:
+            if not isinstance(row, dict):
+                return False, "call_not_dict"
+            tool = str(row.get("tool_name", "")).strip()
+            args = row.get("arguments")
+            if tool not in allowed_tools:
+                return False, f"unknown_tool:{tool or 'empty'}"
+            if not isinstance(args, dict):
+                return False, f"arguments_not_dict:{tool}"
+            required = required_map.get(tool, [])
+            for req in required:
+                if req and req not in args:
+                    return False, f"missing_required:{tool}.{req}"
+        return True, "ok"
+
+    @staticmethod
+    def _validate_r1_indices_with_reason(
+        payload: dict[str, Any],
+        sizes: dict[str, int],
+    ) -> tuple[bool, str]:
+        for key in ("tools", "data_lake", "libraries", "know_how"):
+            val = payload.get(key, [])
+            if not isinstance(val, list):
+                return False, f"{key}_not_list"
+            max_size = int(sizes.get(key, 0))
+            for i, raw in enumerate(val):
+                try:
+                    idx = int(raw)
+                except Exception:
+                    return False, f"{key}[{i}]_not_int"
+                if idx < 0 or idx >= max_size:
+                    return False, f"{key}[{i}]_out_of_range_0_to_{max(0, max_size - 1)}"
+        return True, "ok"
+
+    def _render_code_from_calls(self, calls: list[dict[str, Any]]) -> str:
+        lines = ["print('MAS Step Execution')"]
+        for i, row in enumerate(calls, start=1):
+            tool = str(row.get("tool_name", "")).strip()
+            args = row.get("arguments", {})
+            if not tool or not isinstance(args, dict):
+                continue
+            kwargs = []
+            for k, v in args.items():
+                kwargs.append(f"{k}={self._py_literal(v)}")
+            call = f"{tool}({', '.join(kwargs)})" if kwargs else f"{tool}()"
+            lines.append("try:")
+            lines.append(f"    result_{i} = {call}")
+            lines.append(f"    print('{tool} ok')")
+            lines.append(f"    print(result_{i})")
+            lines.append("except Exception as e:")
+            lines.append(f"    print('{tool} failed:', e)")
+        if len(lines) == 1:
+            raise RuntimeError("No executable tool call generated from LLM call plan")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _py_literal(value: Any) -> str:
+        return py_literal(value)
+
+    @staticmethod
+    def _guess_domains(query: str) -> list[str]:
+        q = query.lower()
+        hits: list[str] = []
+        mapping = {
+            "genome": "Genomics",
+            "variant": "Genetics",
+            "single-cell": "Cell Biology",
+            "drug": "Pharmacology",
+            "pathway": "Molecular Biology",
+            "protein": "Biochemistry",
+            "microbe": "Microbiology",
+        }
+        for token, domain in mapping.items():
+            if token in q and domain not in hits:
+                hits.append(domain)
+        if "Common" not in hits:
+            hits.append("Common")
+        return hits[:3]

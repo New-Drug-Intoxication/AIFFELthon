@@ -1318,7 +1318,7 @@ def quantify_amyloid_beta_plaques(
         df.to_csv(csv_filename, index=False)
 
         colored_labels = color.label2rgb(labeled_image, image=gray_image, bg_label=0, kind="overlay")
-        io.imsave(segmented_image_filename, img_as_ubyte(colored_labels))
+        io.imasve(segmented_image_filename, img_as_ubyte(colored_labels))
 
         log = f"""
 Amyloid-β Plaque Analysis Research Log

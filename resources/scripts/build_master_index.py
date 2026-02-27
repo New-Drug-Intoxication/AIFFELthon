@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = ROOT / "resources" / "source"
-KNOW_HOW_ROOT = ROOT / "biomni_msa" / "know_how"
+KNOW_HOW_ROOT = ROOT / "biomni_mas" / "know_how"
 OUT_DIR = ROOT / "resources" / "index"
 OUT_FILE = OUT_DIR / "master_index.json"
 

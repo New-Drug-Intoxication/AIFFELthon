@@ -643,13 +643,13 @@ def analyze_mitochondrial_morphology_and_potential(morphology_image_path, potent
 
     # Save binary image
     binary_path = os.path.join(output_dir, "binary_mitochondria.png")
-    io.imsave(binary_path, util.img_as_ubyte(binary_img))
+    io.imasve(binary_path, util.img_as_ubyte(binary_img))
     log.append(f"Binary segmentation saved to: {binary_path}")
 
     # Skeletonize for network analysis
     skeleton = morphology.skeletonize(binary_img)
     skeleton_path = os.path.join(output_dir, "skeleton.png")
-    io.imsave(skeleton_path, util.img_as_ubyte(skeleton))
+    io.imasve(skeleton_path, util.img_as_ubyte(skeleton))
     log.append(f"Skeleton image saved to: {skeleton_path}")
 
     # Calculate morphology metrics
@@ -717,7 +717,7 @@ def analyze_mitochondrial_morphology_and_potential(morphology_image_path, potent
     overlay = np.clip(overlay, 0, 1)
 
     overlay_path = os.path.join(output_dir, "morphology_potential_overlay.png")
-    io.imsave(overlay_path, util.img_as_ubyte(overlay))
+    io.imasve(overlay_path, util.img_as_ubyte(overlay))
     log.append(f"Overlay image saved to: {overlay_path}")
 
     # Save quantitative results to CSV

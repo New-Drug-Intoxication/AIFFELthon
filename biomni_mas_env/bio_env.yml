@@ -1,0 +1,15 @@
+name: biomni_mas_e1
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - blast
+  - samtools
+  - bedtools
+  - bowtie2
+  - bwa
+  - fastqc
+  - trimmomatic
+  - mafft
+  - gseapy

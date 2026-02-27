@@ -1070,7 +1070,7 @@ def segment_and_analyze_microbial_cells(image_path, output_dir="./output", min_c
     # Save segmentation image
     segmentation_filename = os.path.join(output_dir, "segmented_cells.png")
     segmentation_image = color.label2rgb(segmented_cells, image, alpha=0.3, bg_label=0)
-    io.imsave(segmentation_filename, (segmentation_image * 255).astype(np.uint8))
+    io.imasve(segmentation_filename, (segmentation_image * 255).astype(np.uint8))
 
     # Save metrics to CSV
     metrics_filename = os.path.join(output_dir, "cell_metrics.csv")
@@ -1228,7 +1228,7 @@ def segment_cells_with_deep_learning(
 
     # Save mask image
     mask_file = os.path.join(save_dir, f"masks_{os.path.basename(image_path)}")
-    io.imsave(mask_file, masks.astype(np.uint16))
+    io.imasve(mask_file, masks.astype(np.uint16))
     log += f"Cell masks saved to: {mask_file}\n"
 
     # Create and save outlines image

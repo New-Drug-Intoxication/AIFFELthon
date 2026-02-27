@@ -305,7 +305,7 @@ def analyze_cell_morphology_and_cytoskeleton(image_path, output_dir="./results",
     # Save segmentation image
     if num_cells > 0:
         segmentation_path = os.path.join(output_dir, "cell_segmentation.png")
-        io.imsave(segmentation_path, labeled_cells.astype(np.uint8) * 50)
+        io.imasve(segmentation_path, labeled_cells.astype(np.uint8) * 50)
         log += f"- Cell segmentation image saved to: {segmentation_path}\n"
 
     # Summary

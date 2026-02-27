@@ -959,9 +959,9 @@ def analyze_protein_conservation(protein_sequences, output_dir="./"):
             alignments.append(new_seq)
 
         # Create and save the alignment
-        msa = MultipleSeqAlignment(alignments)
-        AlignIO.write(msa, aligned_file, "fasta")
-        alignment = msa
+        mas = MultipleSeqAlignment(alignments)
+        AlignIO.write(mas, aligned_file, "fasta")
+        alignment = mas
         log.append("Simple padding alignment completed as fallback method")
         log.append(f"Alignment saved to {aligned_file}")
 
