@@ -174,19 +174,26 @@ python resources/scripts/build_master_index.py
 ## data_lake 폴더를 만들어서, 거기에 15GB 그거 다운 받아놓으신거 가져오면 됩니다.
 
 # .env 파일 만들어서
+```bash
 MAS_LLM="gpt-5-mini"
 MAS_LLM_SOURCE="OpenAI"
 OPENAI_API_KEY="api 넣을 것"
 ANTHROPIC_API_KEY="넣을 것" # 근데 코드상에서 query tool에서 ANTHROPIC을 안쓰는거 같은데 코드 만들다가 그걸 코덱스가 수정ㅎ서 gpt로 하게끔 한듯한..?
 MAS_CLAUDE_TOOL_MODEL="claude-4-sonnet-latest"
 MAS_DATA_LAKE_ROOT="data_lake"
+```
 
-
+```bash
 conda activate biomni_mas_e1
 pip install -r requirements.txt
+```
 
 # web은 이거. 제가 결과 보려고 하는거. 아마 여러분에 맞게 다시 바꾸던가 해야할 듯 한...
+```bash
 python run_mas_web.py --host 127.0.0.1 --port 8080
+```
 
 # 이건 터미널에서
+```bash
 python run_msa_agent.py "Query" --preflight-deps --preflight-install --stream 
+```
