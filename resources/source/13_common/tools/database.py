@@ -18,9 +18,9 @@ except ModuleNotFoundError as exc:
     _BIOPYTHON_IMPORT_ERROR = str(exc)
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from biomni_msa.core.config import default_config
-from biomni_msa.core.data_utils import parse_hpo_obo
-from biomni_msa.core.llm import get_llm
+from biomni_mas.core.config import default_config
+from biomni_mas.core.data_utils import parse_hpo_obo
+from biomni_mas.core.llm import get_llm
 
 
 def _schema_search_dirs() -> list[str]:
@@ -29,7 +29,9 @@ def _schema_search_dirs() -> list[str]:
         os.path.join(here, os.pardir, os.pardir, os.pardir, os.pardir)
     )
     candidates = [
-        os.getenv("MSA_DATA_LAKE_ROOT", "").strip(),
+        os.getenv("MAS_SCHEMA_DB_ROOT", "").strip(),
+        os.path.join(repo_root, "schema_db"),
+        os.getenv("MAS_DATA_LAKE_ROOT", "").strip(),
         os.path.join(repo_root, "data_lake"),
     ]
     out: list[str] = []

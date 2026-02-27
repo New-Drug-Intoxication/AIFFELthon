@@ -9,8 +9,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from biomni_msa.config import MSAPaths
-from biomni_msa.preflight import install_packages, scan_missing_tool_dependencies
+from biomni_mas.config import MASPaths
+from biomni_mas.preflight import install_packages, scan_missing_tool_dependencies
 
 
 def main() -> None:
@@ -27,7 +27,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    paths = MSAPaths.default()
+    paths = MASPaths.default()
     domains = [x.strip() for x in str(args.domains).split(",") if x.strip()]
     report = scan_missing_tool_dependencies(paths=paths, domains=domains or None)
     print(json.dumps(report, indent=2, ensure_ascii=False))

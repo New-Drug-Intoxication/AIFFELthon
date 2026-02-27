@@ -1,52 +1,47 @@
 3 Round - Critique
 ---------------------------------
-현재 당신은 {domain} 전문가 관점에서, 아래 사용자 질의를 해결하기 위한 통합 초안 계획을 검토합니다.
+You are now reviewing the integrated draft plan for solving the user query below from a {domain} expert perspective.
 
-[사용자 질의]
+[User Query]
 {user_query}
 
-[검토 대상 초안 계획]
+[Draft Plan Under Review]
 {draft_master_plan}
 
-[도메인 검토 범위]
-- 자신의 {domain}에 할당된 단계와 그 단계와 직접 연결된 인접 단계(입력/출력 의존 관계)만 검토.
-- 다른 도메인에 할당된 단계는 검토하거나 수정 제안하지 말 것.
+[Domain Review Scope]
+- Review only steps assigned to your own {domain} and directly adjacent dependency steps.
+- Do not propose edits for unrelated domains.
 
-[결함 판정 기준]
-- 개선이나 설계 보강을 하지 말고, 실행 실패로 직결되는 결함만 식별.
-- 다음 중 하나에 명백히 해당할 때만 수정 제안을 작성할 것:
-  1) 현재 초안에 명시된 입력만으로 다음 단계 수행이 물리적으로 불가능한 경우
-  2) 단계 간 순서 또는 의존성이 상호 모순되어 실행이 차단되는 경우
-  3) success_criteria가 전혀 없어 결과 판정이 불가능한 경우
-  4) 생물학적으로 명백히 성립하지 않는 가정을 전제로 하는 경우
-- 통상적 전제 생략(참조 패널, 파라미터, 분석 범위 정의 등)은 결함이 아님.
-- 상위 개요 수준에서 구현 세부가 생략된 것은 결함이 아님.
-- 위 조건에 해당하지 않으면 수정하지 말 것.
+[Defect Decision Criteria]
+Write a revision proposal only when one of the following clearly applies:
+1) The draft misses an essential research question needed to answer the user query.
+2) Step order creates a logical inference gap that prevents valid scientific conclusion.
+3) A step is written as implementation procedure instead of research objective.
+4) `success_criteria` is missing or cannot judge whether the research objective was answered.
+5) The plan assumes something biologically invalid.
+6) `success_criteria` is over-constrained with interpretation-heavy demands when simple observed-result confirmation is sufficient for the query.
 
-과잉 비평 방지 규칙 (우선 적용):
-- "더 좋아질 수 있음" 수준의 제안 금지.
-- 선택지 확대, 분석 추가, 정밀화 요구, 일반론적 Best Practice 제안 금지.
-- 실행 차단 원인과 직접 연결된 최소 수정 1문장만 제시.
-- 결함이 애매하면 수정 제안 대신 no critical defect를 선택.
+Anti-over-critique rules:
+- Do not suggest "nice-to-have" improvements.
+- Do not expand scope beyond the user query.
+- Keep each proposed change as one minimal sentence.
 
-[출력 규칙]
-- 결함이 있는 단계만 언급.
-- recommended_changes는 실행 불능을 해소하기 위한 최소 수정 지시 문장으로 작성.
-- 각 제안은 반드시 "Step {번호}:"로 시작.
-- 기존 구조를 유지하고, 새로운 단계 추가·구조 확장·설계 보강을 하지 말 것.
-- 비평은 [사용자 질의]의 직접 요구 범위 안에서만 수행.
+[Output Rules]
+- Mention only defect steps.
+- `recommended_changes` must resolve the blocking issue with minimal modification.
+- Each proposal must start with `Step {number}:`.
+- Keep structure stable; do not redesign the entire plan.
 
-  [출력 규칙]
-   - 치명적 결함이 없으면 아래 형식으로 반환하십시오:
-     {
-       "critique": "no critical defect",
-       "recommended_changes": []
-     }
+If there is no critical defect, return:
+{
+  "critique": "no critical defect",
+  "recommended_changes": []
+}
 
-  [MSA 출력 스키마]
-   JSON만 출력:
-   {
-     "critique": "...",
-     "recommended_changes": ["...", "..."]
-   }
+[MAS Output Schema]
+Output JSON only:
+{
+  "critique": "...",
+  "recommended_changes": ["...", "..."]
+}
 ---------------------------------

@@ -700,7 +700,7 @@ def quantify_corneal_nerve_fibers(image_path, marker_type, output_dir="./output"
     # Step 6: Save results
     # Save segmented image
     segmented_image_path = os.path.join(output_dir, f"{base_filename}_segmented.png")
-    io.imsave(segmented_image_path, util.img_as_ubyte(cleaned_mask))
+    io.imasve(segmented_image_path, util.img_as_ubyte(cleaned_mask))
 
     # Save measurements to CSV
     measurements_path = os.path.join(output_dir, f"{base_filename}_measurements.csv")
@@ -881,7 +881,7 @@ def segment_and_quantify_cells_in_multiplexed_images(
 
     # Save segmentation mask for visualization
     mask_file = os.path.join(output_dir, f"cell_segmentation_mask_{timestamp}.tiff")
-    io.imsave(mask_file, cell_masks.astype(np.uint16))
+    io.imasve(mask_file, cell_masks.astype(np.uint16))
     log.append(f"Saved cell segmentation mask to {mask_file}")
 
     # Summarize results
@@ -1004,7 +1004,7 @@ def analyze_bone_microct_morphometry(input_file_path, output_dir="./results", th
     # Save binary segmentation as a sample slice
     middle_slice = binary_image.shape[0] // 2
     segmentation_file = os.path.join(output_dir, "bone_segmentation_slice.tif")
-    io.imsave(segmentation_file, binary_image[middle_slice].astype(np.uint8) * 255)
+    io.imasve(segmentation_file, binary_image[middle_slice].astype(np.uint8) * 255)
     log.append(f"Sample segmentation slice saved to: {segmentation_file}")
 
     # Save numerical results as JSON

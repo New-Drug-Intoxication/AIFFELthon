@@ -198,7 +198,7 @@ Orchestrator Module 3: [Execution-Manager]
         - 담당 에이전트에게 보내는 실행 지시(Context 포함)
         - 또는 재시도(Retry) / 부분 재계획(Plan Revision) / 예외적 Full Reset 명령.
 
-  [MSA 상태 스키마]
+  [MAS 상태 스키마]
    - Domain Verifier 결과는 JSON으로 입력된다고 가정:
      {"status":"SUCCESS|FAILURE|PLAN_REVISION","reason":"...","immediate_action":"...","observe_output":"..."}
    - 분기 규칙:

@@ -7,8 +7,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from biomni_msa.config import MSAPaths
-from biomni_msa.data_lake import (
+from biomni_mas.config import MASPaths
+from biomni_mas.data_lake import (
     ensure_data_lake_files,
     find_missing_files,
     load_data_lake_catalog,
@@ -44,12 +44,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--data-lake-root",
-        default=os.getenv("MSA_DATA_LAKE_ROOT", ""),
+        default=os.getenv("MAS_DATA_LAKE_ROOT", ""),
         help="Override local data lake root path",
     )
     parser.add_argument(
         "--s3-bucket-url",
-        default=os.getenv("MSA_S3_BUCKET_URL", ""),
+        default=os.getenv("MAS_S3_BUCKET_URL", ""),
         help="Override S3 bucket URL",
     )
     parser.add_argument(
@@ -59,7 +59,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    paths = MSAPaths.default()
+    paths = MASPaths.default()
     data_lake_root = (
         Path(args.data_lake_root).expanduser()
         if args.data_lake_root

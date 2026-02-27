@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generated_at": "2026-02-20T00:01:34.863002+00:00",
+    "generated_at": "2026-02-26T01:22:41.417049+00:00",
     "version": "v2-master",
     "source_root": "resources/source",
     "index_mode": "single_file_with_lazy_resolution"
@@ -39,7 +39,7 @@
     {
       "domain": "genetics",
       "tool_count": 9,
-      "data_count": 11,
+      "data_count": 10,
       "library_count": 37
     },
     {
@@ -2708,16 +2708,6 @@
         "short_description": "Gene ontology data for functional gene annotations.",
         "source_path": "resources/source/06_genetics/env_desc.py",
         "symbol": "data_lake_dict[go-plus.json]"
-      },
-      {
-        "id": 859155677,
-        "rid": "data:genetics:gwas_catalog.pkl",
-        "kind": "data",
-        "domain": "genetics",
-        "name": "gwas_catalog.pkl",
-        "short_description": "Genome-wide association studies (GWAS) results.",
-        "source_path": "resources/source/06_genetics/env_desc.py",
-        "symbol": "data_lake_dict[gwas_catalog.pkl]"
       },
       {
         "id": 2135109759,
@@ -7930,7 +7920,7 @@
         "domain": "common",
         "name": "sgRNA Design Guide: Three-Tiered Approach",
         "short_description": "Know-how guide: sgRNA_design_guide",
-        "source_path": "biomni_msa/know_how/sgRNA_design_guide.md",
+        "source_path": "biomni_mas/know_how/sgRNA_design_guide.md",
         "symbol": "markdown_document"
       },
       {
@@ -7940,7 +7930,7 @@
         "domain": "common",
         "name": "Single Cell RNA-seq Cell Type Annotation",
         "short_description": "Know-how guide: single_cell_annotation",
-        "source_path": "biomni_msa/know_how/single_cell_annotation.md",
+        "source_path": "biomni_mas/know_how/single_cell_annotation.md",
         "symbol": "markdown_document"
       }
     ]

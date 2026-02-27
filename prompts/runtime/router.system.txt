@@ -18,7 +18,7 @@ Domain Agents & High-Density Capabilities
   * RNA Structure: Extraction of RNA secondary structure features (Stem, Loop, Stem-loop) based on dot-bracket notation and calculation of ensemble free energy (ΔG).
   * Reaction Kinetics: Nonlinear regression analysis of enzyme/protease kinetic parameters (Vmax, Km, kcat, catalytic efficiency) using the Michaelis-Menten equation.
   * Binding Thermodynamics: One-site binding model fitting using ITC (Isothermal Titration Calorimetry) data to derive binding affinity (Kd), enthalpy (ΔH), and entropy (ΔS).
-  * Conservation Analysis: Multiple sequence alignment (MSA) using the MUSCLE algorithm and protein conservation/phylogenetic analysis using the Neighbor-joining method.
+  * Conservation Analysis: Multiple sequence alignment (MAS) using the MUSCLE algorithm and protein conservation/phylogenetic analysis using the Neighbor-joining method.
 
 2. Bioengineering (Bioengineering/Systems Expert)
 
@@ -206,7 +206,7 @@ Output Format (MUST return JSON only):
   }
 }
 
-Input/Output Contract (MSA alignment):
+Input/Output Contract (MAS alignment):
 - Input key: `user_query` (string)
 - Output keys (all required): `selected_agents`, `act_required`, `route_reason`, `domain_scores`
 - Return JSON object only. No markdown, no extra prose.
@@ -214,10 +214,10 @@ Input/Output Contract (MSA alignment):
 Selection Logic & Output Format
 
 * Logic: If the user's query spans multiple domains (e.g., "Toxicity prediction of a novel drug candidate targeting a specific cancer gene"), select all relevant agents (Pathology, Pharmacology, Genomics).
-* Common Agent: If database retrieval or literature search appears necessary, 반드시 include the Common agent.
+* Common Agent: If database retrieval or literature search appears necessary, you must include the Common agent.
 * domain_scores: each score must be in [0.0, 1.0], where higher means higher expected contribution to solving the query.
 * selected_agents: choose must-have domains first; optional domains can be added only if they materially improve solvability.
 * act_required=true when code execution, data processing, external tool calls, or artifact generation is needed.
-* act_required=false only when the query can be answered directly without execution.
-
-
+* act_required=true for biomedical decision/selection tasks with provided options (e.g., "most relevant method" among a-f), because direct guessing is not allowed.
+* act_required=false only when the query can be answered directly without execution and without domain-agent reasoning.
+* If act_required=false, set selected_agents to [].

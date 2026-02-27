@@ -12,7 +12,7 @@ import torch
 from pybiomart import Dataset
 from tqdm import tqdm
 
-from biomni_msa.core.llm import get_llm
+from biomni_mas.core.llm import get_llm
 
 
 def unsupervised_celltype_transfer_between_scRNA_datasets(

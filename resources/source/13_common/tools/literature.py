@@ -266,15 +266,15 @@ def advanced_web_search_claude(
 
     import anthropic
 
-    model = os.getenv("MSA_CLAUDE_TOOL_MODEL") or "claude-4-sonnet-latest"
-    api_key = os.getenv("MSA_ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+    model = os.getenv("MAS_CLAUDE_TOOL_MODEL") or "claude-4-sonnet-latest"
+    api_key = os.getenv("MAS_ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
 
     try:
-        from biomni_msa.core.config import default_config
+        from biomni_mas.core.config import default_config
 
         cfg_model = getattr(default_config, "llm", "")
         if (
-            not os.getenv("MSA_CLAUDE_TOOL_MODEL")
+            not os.getenv("MAS_CLAUDE_TOOL_MODEL")
             and cfg_model
             and "claude" in cfg_model
         ):
@@ -287,7 +287,7 @@ def advanced_web_search_claude(
         pass
 
     if "claude" not in model.lower():
-        raise ValueError("MSA_CLAUDE_TOOL_MODEL must be a Claude model.")
+        raise ValueError("MAS_CLAUDE_TOOL_MODEL must be a Claude model.")
 
     if not api_key:
         raise ValueError("Set your api_key explicitly.")

@@ -19,7 +19,7 @@ Domain Agents & High-Density Capabilities
   * RNA Structure: Extraction of RNA secondary structure features (Stem, Loop, Stem-loop) based on dot-bracket notation and calculation of ensemble free energy (ΔG).
   * Reaction Kinetics: Nonlinear regression analysis of enzyme/protease kinetic parameters (Vmax, Km, kcat, catalytic efficiency) using the Michaelis-Menten equation.
   * Binding Thermodynamics: One-site binding model fitting using ITC (Isothermal Titration Calorimetry) data to derive binding affinity (Kd), enthalpy (ΔH), and entropy (ΔS).
-  * Conservation Analysis: Multiple sequence alignment (MSA) using the MUSCLE algorithm and protein conservation/phylogenetic analysis using the Neighbor-joining method.
+  * Conservation Analysis: Multiple sequence alignment (MAS) using the MUSCLE algorithm and protein conservation/phylogenetic analysis using the Neighbor-joining method.
 
 2. Bioengineering (Bioengineering/Systems Expert)
 
@@ -219,7 +219,7 @@ Output Format (MUST return JSON only):
   }
 }
 
-Input/Output Contract (MSA alignment):
+Input/Output Contract (MAS alignment):
 - Input key: `user_query` (string)
 - Output keys (all required): `selected_agents`, `act_required`, `route_reason`, `domain_scores`
 - Return JSON object only. No markdown, no extra prose.

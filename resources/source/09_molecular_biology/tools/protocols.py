@@ -13,10 +13,10 @@ import requests
 
 try:
     # Optional import to read from central config if available
-    from biomni_msa.config import MSAPaths
-    from biomni_msa.core.config import default_config
+    from biomni_mas.config import MASPaths
+    from biomni_mas.core.config import default_config
 except Exception:
-    MSAPaths = None  # type: ignore
+    MASPaths = None  # type: ignore
     default_config = None  # fallback if import fails
 
 
@@ -25,7 +25,7 @@ PROTOCOLS_IO_API_BASE = "https://www.protocols.io/api/v3"
 
 # Resolve access token from env or config (no hardcoded defaults)
 ACCESS_TOKEN = os.getenv("PROTOCOLS_IO_ACCESS_TOKEN") or os.getenv(
-    "MSA_PROTOCOLS_IO_ACCESS_TOKEN"
+    "MAS_PROTOCOLS_IO_ACCESS_TOKEN"
 )
 if not ACCESS_TOKEN and default_config is not None:
     ACCESS_TOKEN = getattr(default_config, "protocols_io_access_token", None)
@@ -62,7 +62,7 @@ def search_protocols(
     # Ensure access token is configured
     if not ACCESS_TOKEN:
         raise ValueError(
-            "Protocols.io access token is not configured. Set PROTOCOLS_IO_ACCESS_TOKEN or MSA_PROTOCOLS_IO_ACCESS_TOKEN env var, or configure MSACompatConfig.protocols_io_access_token."
+            "Protocols.io access token is not configured. Set PROTOCOLS_IO_ACCESS_TOKEN or MAS_PROTOCOLS_IO_ACCESS_TOKEN env var, or configure MASCompatConfig.protocols_io_access_token."
         )
 
     # Construct API request
@@ -194,8 +194,8 @@ def get_protocol_details(protocol_id: int, timeout: int = 30) -> dict[str, Any]:
 def _get_protocols_directory():
     """Get the path to the local protocols directory."""
     candidates: list[Path] = []
-    if MSAPaths is not None:
-        candidates.append(MSAPaths.default().repo_root / "resources" / "protocols")
+    if MASPaths is not None:
+        candidates.append(MASPaths.default().repo_root / "resources" / "protocols")
     candidates.append(Path(__file__).resolve().parents[3] / "protocols")
     for path in candidates:
         if path.exists():
