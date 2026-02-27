@@ -4492,101 +4492,102 @@ def blast_sequence(sequence: str, database: str, program: str) -> dict[str, str 
         dict: A dictionary containing the title, e-value, identity percentage, and coverage percentage of the best alignment
 
     """
-    max_attempts = 1
-    attempts = 0
-    max_runtime = 600  # 10 minutes in seconds
+    import re as _re_blast
+    from io import StringIO as _StringIO
 
-    while attempts < max_attempts:
+    BLAST_URL = "https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi"
+    _HEADERS = {"User-Agent": "biomni-blast-client/1.0"}
+    MAX_RUNTIME = 600  # 10 minutes
+    POLL_INTERVAL = 15  # seconds between status checks
+
+    # Step 1: Submit BLAST job via requests (avoids urllib SSL issues)
+    submit_params = {
+        "CMD": "Put",
+        "PROGRAM": program,
+        "DATABASE": database,
+        "QUERY": sequence,
+        "EXPECT": 100,
+        "WORD_SIZE": 7,
+        "HITLIST_SIZE": 10,
+        "FORMAT_TYPE": "XML",
+    }
+    try:
+        print("Submitting BLAST job...")
+        r = requests.post(BLAST_URL, data=submit_params, headers=_HEADERS, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        err = str(e)
+        return _format_blast_error(_classify_blast_error(err), f"Failed to submit BLAST job: {err}")
+
+    rid_match = _re_blast.search(r"RID = (\w+)", r.text)
+    rtoe_match = _re_blast.search(r"RTOE = (\d+)", r.text)
+    if not rid_match:
+        return _format_blast_error("BLAST_UNKNOWN_ERROR", "No RID returned from BLAST submission")
+
+    rid = rid_match.group(1)
+    rtoe = int(rtoe_match.group(1)) if rtoe_match else POLL_INTERVAL
+    print(f"BLAST job submitted. RID: {rid}, estimated wait: {rtoe}s")
+
+    # Step 2: Poll for results
+    time.sleep(min(rtoe, 30))
+    start_time = time.time()
+
+    while time.time() - start_time < MAX_RUNTIME:
         try:
-            attempts += 1
-            query_sequence = Seq(sequence)
-
-            # Start timer
-            start_time = time.time()
-
-            # Submit BLAST job
-            print(f"Submitting BLAST job (attempt {attempts}/{max_attempts})...")
-            result_handle = NCBIWWW.qblast(
-                program,
-                database,
-                query_sequence,
-                expect=100,
-                word_size=7,
-                megablast=True,
+            poll_r = requests.get(
+                BLAST_URL,
+                params={"CMD": "Get", "RID": rid, "FORMAT_TYPE": "XML"},
+                headers=_HEADERS,
+                timeout=60,
             )
+            poll_r.raise_for_status()
+        except Exception as e:
+            print(f"Poll error: {e}, retrying in {POLL_INTERVAL}s...")
+            time.sleep(POLL_INTERVAL)
+            continue
 
-            # Parse results with timeout check
-            blast_records = NCBIXML.parse(result_handle)
-            blast_record = None
+        text = poll_r.text
+        if "Status=WAITING" in text:
+            elapsed = time.time() - start_time
+            print(f"BLAST status: WAITING (elapsed {elapsed:.0f}s / {MAX_RUNTIME}s)")
+            time.sleep(POLL_INTERVAL)
+            continue
+        elif "Status=FAILED" in text or "Status=UNKNOWN" in text:
+            return _format_blast_error("BLAST_UNKNOWN_ERROR", f"BLAST job {rid} failed on NCBI server")
+        elif "<BlastOutput>" in text:
+            # Results are ready — parse XML
+            try:
+                blast_records = NCBIXML.parse(_StringIO(text))
+                blast_record = next(blast_records)
+            except Exception as e:
+                return _format_blast_error("BLAST_UNKNOWN_ERROR", f"Failed to parse BLAST XML: {e}")
 
-            # Try to get the first record with timeout check
-            while time.time() - start_time < max_runtime:
-                try:
-                    # Set a short timeout for next operation
-                    blast_record = next(blast_records)  # Get first record
-                    break  # Successfully got the record
-                except StopIteration:
-                    # No more records
-                    return "No BLAST results found"
-                except Exception:
-                    # Check if we've exceeded the time limit
-                    if time.time() - start_time >= max_runtime:
-                        if attempts < max_attempts:
-                            print("BLAST job timeout exceeded. Resubmitting...")
-                            break  # Break to retry
-                        else:
-                            return _format_blast_error(
-                                "BLAST_TIMEOUT",
-                                "BLAST search failed after maximum attempts due to timeout",
-                            )
-                    # Brief pause before trying again
-                    time.sleep(1)
-
-            # Check if we timed out during record retrieval
-            if blast_record is None:
-                if attempts < max_attempts:
-                    continue  # Retry
-                else:
-                    return _format_blast_error(
-                        "BLAST_TIMEOUT",
-                        "BLAST search failed after maximum attempts due to timeout",
-                    )
-
-            # Debug information
             print(f"Number of alignments found: {len(blast_record.alignments)}")
 
             if blast_record.alignments:
-                for alignment in blast_record.alignments:
-                    print("\nAlignment:")
-                    print(f"hit_id: {alignment.hit_id}")
-                    print(f"hit_def: {alignment.hit_def}")
-                    print(f"accession: {alignment.accession}")
-                    for hsp in alignment.hsps:
-                        print(f"E-value: {hsp.expect}")
-                        print(f"Score: {hsp.score}")
-                        print(f"Identities: {hsp.identities}/{hsp.align_length}")
-
-                        return {
-                            "hit_id": alignment.hit_id,
-                            "hit_def": alignment.hit_def,
-                            "accession": alignment.accession,
-                            "e_value": hsp.expect,
-                            "identity": (hsp.identities / float(hsp.align_length)) * 100,
-                            "coverage": len(hsp.query) / len(sequence) * 100,
-                        }
+                alignment = blast_record.alignments[0]
+                hsp = alignment.hsps[0]
+                print(f"\nAlignment:")
+                print(f"hit_id: {alignment.hit_id}")
+                print(f"hit_def: {alignment.hit_def}")
+                print(f"accession: {alignment.accession}")
+                print(f"E-value: {hsp.expect}")
+                print(f"Score: {hsp.score}")
+                print(f"Identities: {hsp.identities}/{hsp.align_length}")
+                return {
+                    "hit_id": alignment.hit_id,
+                    "hit_def": alignment.hit_def,
+                    "accession": alignment.accession,
+                    "e_value": hsp.expect,
+                    "identity": (hsp.identities / float(hsp.align_length)) * 100,
+                    "coverage": len(hsp.query) / len(sequence) * 100,
+                }
             else:
                 return "No alignments found - sequence might be too short or low complexity"
+        else:
+            time.sleep(POLL_INTERVAL)
 
-        except Exception as e:
-            if attempts < max_attempts:
-                print(f"Error during BLAST search: {str(e)}. Retrying...")
-                time.sleep(2)  # Wait briefly before retrying
-            else:
-                err = str(e)
-                code = _classify_blast_error(err)
-                return _format_blast_error(code, f"Error during BLAST search after maximum attempts: {err}")
-
-    return _format_blast_error("BLAST_UNKNOWN_ERROR", "BLAST search failed after maximum attempts")
+    return _format_blast_error("BLAST_TIMEOUT", f"BLAST search timed out after {MAX_RUNTIME}s (RID: {rid})")
 
 
 def query_reactome(
