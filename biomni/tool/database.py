@@ -4497,10 +4497,11 @@ def blast_sequence(sequence: str, database: str, program: str) -> dict[str, str 
 
     BLAST_URL = "https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi"
     _HEADERS = {"User-Agent": "biomni-blast-client/1.0"}
-    MAX_RUNTIME = 300  # 5 minutes — kept well below the 600s step timeout so
-    #                    that a BLAST timeout returns a proper error+hint message
-    #                    rather than being killed by run_with_timeout (which would
-    #                    cause the entire instance to terminate immediately).
+    MAX_RUNTIME = 900  # 15 minutes — the step timeout is extended to 1200s when
+    #                    blast_sequence is detected in the code (see a1.py).
+    #                    900s gives BLAST time to succeed on a busy NCBI queue
+    #                    while leaving 300s margin before the 1200s step timeout
+    #                    would kill the process (terminating the whole instance).
     POLL_INTERVAL = 15  # seconds between status checks
 
     # Step 1: Submit BLAST job via requests (avoids urllib SSL issues)

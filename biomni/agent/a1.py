@@ -1783,6 +1783,14 @@ Each library is listed with its description to help you understand its functiona
                 if isinstance(task_step_timeout, int) and task_step_timeout > 0:
                     timeout = task_step_timeout
 
+                # Dynamically extend timeout when the step calls blast_sequence,
+                # which can legitimately take up to 5 minutes on a busy NCBI queue.
+                # Without this, the 600s step timeout would kill the process before
+                # BLAST finishes and trigger immediate instance termination.
+                _BLAST_STEP_TIMEOUT = 1200
+                if "blast_sequence" in code and timeout < _BLAST_STEP_TIMEOUT:
+                    timeout = _BLAST_STEP_TIMEOUT
+
                 # Check if the code is R code
                 if (
                     code.strip().startswith("#!R")
