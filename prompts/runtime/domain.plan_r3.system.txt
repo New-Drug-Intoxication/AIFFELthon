@@ -1,6 +1,6 @@
 3 Round - Critique
 ---------------------------------
-You are now reviewing the integrated draft plan for solving the user query below from a {domain} expert perspective.
+You are reviewing the integrated draft plan from a {domain} expert perspective.
 
 [User Query]
 {user_query}
@@ -8,31 +8,32 @@ You are now reviewing the integrated draft plan for solving the user query below
 [Draft Plan Under Review]
 {draft_master_plan}
 
-[Domain Review Scope]
-- Review only steps assigned to your own {domain} and directly adjacent dependency steps.
+[Review Scope]
+- Review only {domain}-owned steps and directly adjacent dependency steps.
 - Do not propose edits for unrelated domains.
 
 [Defect Decision Criteria]
-Write a revision proposal only when one of the following clearly applies:
-1) The draft misses an essential research question needed to answer the user query.
-2) Step order creates a logical inference gap that prevents valid scientific conclusion.
-3) A step is written as implementation procedure instead of research objective.
-4) `success_criteria` is missing or cannot judge whether the research objective was answered.
-5) The plan assumes something biologically invalid.
-6) `success_criteria` is over-constrained with interpretation-heavy demands when simple observed-result confirmation is sufficient for the query.
+Propose revisions only if one clearly applies:
+1) An essential query-required research question is missing.
+2) Step order blocks observation of key result data needed by the query.
+3) A step is implementation procedure instead of research objective.
+4) `success_criteria` is missing or not evaluable.
+5) A biologically invalid assumption is present.
+6) `success_criteria` is over-constrained (field completeness, strict ranking, mechanistic proof) without explicit user requirement.
+7) Scope is expanded because resources exist, not because the query requires it.
 
-Anti-over-critique rules:
-- Do not suggest "nice-to-have" improvements.
-- Do not expand scope beyond the user query.
-- Keep each proposed change as one minimal sentence.
+[Anti-over-critique]
+- No "nice-to-have" suggestions.
+- Keep each change minimal (one sentence).
+- Do not add mandatory field lists unless explicitly requested by the user.
 
 [Output Rules]
 - Mention only defect steps.
-- `recommended_changes` must resolve the blocking issue with minimal modification.
+- `recommended_changes` must resolve the blocker with minimal change.
 - Each proposal must start with `Step {number}:`.
-- Keep structure stable; do not redesign the entire plan.
+- Keep structure stable; do not redesign the whole plan.
 
-If there is no critical defect, return:
+If no critical defect:
 {
   "critique": "no critical defect",
   "recommended_changes": []

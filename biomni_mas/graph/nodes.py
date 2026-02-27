@@ -20,7 +20,10 @@ class MASGraphNodes:
             verifier = row.get("verifier", {})
             if not isinstance(verifier, dict):
                 continue
-            status = str(verifier.get("status", "")).strip().upper()
+            raw_status = verifier.get("status", "")
+            status = str(getattr(raw_status, "value", raw_status)).strip().upper()
+            if status.startswith("VERIFIERSTATUS."):
+                status = status.split(".")[-1]
             if status != VerifierStatus.SUCCESS.value:
                 continue
             try:
