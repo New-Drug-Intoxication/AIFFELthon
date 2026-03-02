@@ -7,3 +7,4 @@ workspace/
 tlfwp.txt
 biomni_101.ipynb
 eval1_test/
+.pybiomart.sqlite
