@@ -32,8 +32,7 @@ class MASGraphNodes:
                 continue
         return completed
 
-    @staticmethod
-    def _render_execution_checklist(mas_state: Any) -> str:
+    def _render_execution_checklist(self, mas_state: Any) -> str:
         plan = getattr(mas_state, "final_master_plan", []) or []
         if not plan:
             return "execution checklist unavailable (empty plan)"
@@ -45,9 +44,12 @@ class MASGraphNodes:
             text = str(getattr(step, "step", "")).strip()
             owner = str(getattr(step, "owner_agent", "Common")).strip() or "Common"
             success = str(getattr(step, "success_criteria", "done")).strip() or "done"
-            lines.append(
-                f"{idx}. [{mark}] {text} | owner_agent: {owner} | success_criteria: {success}"
-            )
+            if bool(getattr(self.agent, "use_success_criteria", True)):
+                lines.append(
+                    f"{idx}. [{mark}] {text} | owner_agent: {owner} | success_criteria: {success}"
+                )
+            else:
+                lines.append(f"{idx}. [{mark}] {text} | owner_agent: {owner}")
         return "\n".join(lines)
 
     def router(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -161,7 +163,7 @@ class MASGraphNodes:
         self.agent._emit(
             mas_state,
             f"[Execution-R1 | {step.owner_agent} | Step {step.step_id} Message]",
-            f"Executing: {step.step}",
+            f"Executing: {step.step}\nexecuted_code\n{execution_code}",
             {"execution_think": execution_think, "executed_code": execution_code},
             stream,
         )
@@ -187,6 +189,7 @@ class MASGraphNodes:
             {
                 "step_id": step.step_id,
                 "owner_agent": step.owner_agent,
+                "use_success_criteria": bool(self.agent.use_success_criteria),
                 "execution_think": execution_think,
                 "executed_code": execution_code,
                 "observe_output": observe_output,

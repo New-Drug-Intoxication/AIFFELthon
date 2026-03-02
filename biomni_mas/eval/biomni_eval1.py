@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import sys
 from typing import Any
 
 
@@ -47,7 +48,25 @@ class BiomniEval1:
         pd = __import__("pandas")
 
         self.dataset_path = dataset_path or DEFAULT_EVAL1_URI
-        self.df = pd.read_parquet(self.dataset_path)
+        if str(self.dataset_path).startswith("hf://"):
+            try:
+                __import__("huggingface_hub")
+            except Exception as exc:
+                raise RuntimeError(
+                    "Eval1 requires huggingface_hub for hf:// dataset paths. "
+                    f"python={sys.executable}, dataset_path={self.dataset_path}, import_error={exc}"
+                ) from exc
+        try:
+            self.df = pd.read_parquet(self.dataset_path)
+        except Exception as exc:
+            msg = str(exc)
+            if "Install huggingface_hub to access HfFileSystem" in msg:
+                raise RuntimeError(
+                    "Eval1 failed to read hf:// dataset because huggingface_hub is not "
+                    "available in the running interpreter. "
+                    f"python={sys.executable}, dataset_path={self.dataset_path}"
+                ) from exc
+            raise
         self.instance_map: dict[tuple[str, int], int] = {}
         for idx, row in self.df.iterrows():
             key = (str(row["task_name"]), int(row["task_instance_id"]))

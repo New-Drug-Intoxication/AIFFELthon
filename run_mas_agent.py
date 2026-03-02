@@ -39,6 +39,11 @@ def main() -> None:
         action="store_true",
         help="Continue agent run even if missing deps are found",
     )
+    parser.add_argument(
+        "--no-success-criteria",
+        action="store_true",
+        help="Disable success_criteria-based execution verification (intent-based mode)",
+    )
     args = parser.parse_args()
 
     if args.preflight_deps:
@@ -72,7 +77,7 @@ def main() -> None:
             )
             raise SystemExit(2)
 
-    agent = MASAgent()
+    agent = MASAgent(use_success_criteria=not args.no_success_criteria)
     result = agent.go(args.query, verbose=not args.no_trace, stream=args.stream)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

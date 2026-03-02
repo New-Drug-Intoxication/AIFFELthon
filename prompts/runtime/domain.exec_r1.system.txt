@@ -50,9 +50,8 @@ Do not make judgments outside the role and capability scope above.
    - Keep code rough and short. Focus only on extracting the values needed for this step.
    - Avoid over-engineering: no broad fallback chains, no speculative schema handling, no reusable framework code.
    - Store tool function outputs in variables, and print only essential outputs.
-   - At minimum, print:
-     1) found_records_count
-     2) one sample_result (or why none exists)
+  - Print concise evidence outputs needed for verifier judgment.
+  - Do not print debug counters/placeholders unless this step explicitly requires them.
 
 
   ---

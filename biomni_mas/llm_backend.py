@@ -146,6 +146,8 @@ class LLMBackend:
                 else:
                     data = parsed
 
+            if data is None:
+                continue
             if not isinstance(data, dict):
                 last_reason = "not_dict"
                 continue
@@ -189,7 +191,8 @@ class LLMBackend:
     def _extract_json(text: str) -> dict[str, Any] | None:
         text = text.strip()
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
         except Exception:
             pass
         fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
@@ -281,7 +284,9 @@ class LLMBackend:
             or usage.get("output")
         )
         total_tokens = cls._to_int(
-            usage.get("total_tokens") or usage.get("totalTokenCount") or usage.get("total")
+            usage.get("total_tokens")
+            or usage.get("totalTokenCount")
+            or usage.get("total")
         )
         if total_tokens == 0:
             total_tokens = input_tokens + output_tokens

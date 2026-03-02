@@ -35,7 +35,7 @@ class StepSpec:
     step_id: int
     step: str
     owner_agent: str
-    success_criteria: str
+    success_criteria: str | None = None
 
 
 @dataclass

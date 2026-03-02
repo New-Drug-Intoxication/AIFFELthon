@@ -72,6 +72,7 @@ class MASAgent:
         runtime: AgentRuntimeConfig | None = None,
         llm_model: str | None = None,
         event_callback: Callable[[dict[str, Any]], None] | None = None,
+        use_success_criteria: bool | None = None,
     ):
         self.paths = paths or MASPaths.default()
         self.runtime = runtime or AgentRuntimeConfig()
@@ -85,6 +86,12 @@ class MASAgent:
         self.llm = LLMBackend(model_name=resolved_model)
         self.graph = build_mas_graph(self)
         self.event_callback = event_callback
+        if use_success_criteria is None:
+            self.use_success_criteria = bool(
+                getattr(self.runtime, "use_success_criteria", True)
+            )
+        else:
+            self.use_success_criteria = bool(use_success_criteria)
         self.session_id = str(uuid.uuid4())[:8]
         self.workspace_path = self.paths.workspace_root / self.session_id
         self._execution_namespace: dict[str, Any] = {}
@@ -270,7 +277,12 @@ class MASAgent:
                 success = str(step.get("success_criteria", "done")).strip() or "done"
                 if not step_text:
                     continue
-                r2_lines.append(f"{idx}. [ ] {step_text} | success_criteria: {success}")
+                if self.use_success_criteria:
+                    r2_lines.append(
+                        f"{idx}. [ ] {step_text} | success_criteria: {success}"
+                    )
+                else:
+                    r2_lines.append(f"{idx}. [ ] {step_text}")
             r2_content = "\n".join(r2_lines) if r2_lines else f"steps={len(r2_steps)}"
             self._emit(
                 state,
@@ -298,10 +310,11 @@ class MASAgent:
                         step_id=i,
                         step=step_text,
                         owner_agent=solo_domain,
-                        success_criteria=str(
-                            row.get("success_criteria", "done")
-                        ).strip()
-                        or "done",
+                        success_criteria=(
+                            str(row.get("success_criteria", "done")).strip() or "done"
+                            if self.use_success_criteria
+                            else ""
+                        ),
                     )
                 )
         else:
@@ -316,7 +329,11 @@ class MASAgent:
             if not step_text:
                 continue
             draft_lines.append(
-                f"{idx}. [ ] {step_text} | owner_agent: {owner} | success_criteria: {success}"
+                (
+                    f"{idx}. [ ] {step_text} | owner_agent: {owner} | success_criteria: {success}"
+                    if self.use_success_criteria
+                    else f"{idx}. [ ] {step_text} | owner_agent: {owner}"
+                )
             )
         draft_content = (
             "\n".join(draft_lines) if draft_lines else f"draft steps={len(draft_plan)}"
@@ -365,6 +382,7 @@ class MASAgent:
                 query=state.user_query,
                 allowed_owners=set(selected_agents) | {"Common"},
             )
+        final_plan = self._downscale_plan_to_available_resources(final_plan)
         state.final_master_plan = final_plan
         final_lines = []
         for idx, step in enumerate(final_plan, start=1):
@@ -374,7 +392,11 @@ class MASAgent:
             if not step_text:
                 continue
             final_lines.append(
-                f"{idx}. [ ] {step_text} | owner_agent: {owner} | success_criteria: {success}"
+                (
+                    f"{idx}. [ ] {step_text} | owner_agent: {owner} | success_criteria: {success}"
+                    if self.use_success_criteria
+                    else f"{idx}. [ ] {step_text} | owner_agent: {owner}"
+                )
             )
         final_content = (
             "\n".join(final_lines) if final_lines else f"final steps={len(final_plan)}"
@@ -409,17 +431,26 @@ class MASAgent:
             self.prompts.router(),
             {"user_query": state.user_query},
         )
-        payload = self.llm.complete_json_strict(
-            prompt,
-            required_keys=[
-                "selected_agents",
-                "route_reason",
-                "act_required",
-                "domain_scores",
-            ],
-            retries=self.runtime.json_retries,
-            stage="router",
-        )
+        try:
+            payload = self.llm.complete_json_strict(
+                prompt,
+                required_keys=[
+                    "selected_agents",
+                    "route_reason",
+                    "act_required",
+                    "domain_scores",
+                ],
+                retries=self.runtime.json_retries,
+                stage="router",
+            )
+        except RuntimeError as exc:
+            reason = self._compact_text(str(exc), max_chars=220, max_lines=2)
+            return RouterOutput(
+                selected_agents=[],
+                route_reason=f"router_fallback_no_act: {reason}",
+                act_required=False,
+                domain_scores={},
+            )
         raw_selected = payload.get("selected_agents", [])
         selected = raw_selected if isinstance(raw_selected, list) else []
         domain_scores = {
@@ -541,7 +572,9 @@ class MASAgent:
         )
         profile = self.domain_profiles.get(domain, {})
         section = self.prompts.domain_round(
-            "2 Round - Planner",
+            "2 Round - Planner"
+            if self.use_success_criteria
+            else "2 Round - Planner (NoSC)",
             ["3 Round - Critique", "Excution"],
         )
         prompt = self._inject_prompt(
@@ -581,6 +614,7 @@ class MASAgent:
             prompt=prompt,
             default_owner=domain,
             require_owner=False,
+            require_success_criteria=self.use_success_criteria,
         )
         checklist_steps = []
         checklist = []
@@ -593,8 +627,11 @@ class MASAgent:
                     "step_id": i,
                     "step": step_text,
                     "owner_agent": None,
-                    "success_criteria": str(item.get("success_criteria", "")).strip()
-                    or "done",
+                    "success_criteria": (
+                        (str(item.get("success_criteria", "")).strip() or "done")
+                        if self.use_success_criteria
+                        else ""
+                    ),
                 }
             )
             checklist.append(f"[ ] {step_text}")
@@ -619,7 +656,7 @@ class MASAgent:
             for srow in out.get("checklist_steps", []):
                 stext = str(srow.get("step", "")).strip().lower()
                 scrit = str(srow.get("success_criteria", "")).strip()
-                if stext and scrit:
+                if self.use_success_criteria and stext and scrit:
                     criteria_map[(domain, stext)] = scrit
             for step in out.get("checklist_steps", []):
                 text = str(step.get("step", "")).strip()
@@ -634,8 +671,10 @@ class MASAgent:
                         step_id=sid,
                         step=text,
                         owner_agent=domain,
-                        success_criteria=criteria_map.get(
-                            (domain, text.lower()), "done"
+                        success_criteria=(
+                            criteria_map.get((domain, text.lower()), "done")
+                            if self.use_success_criteria
+                            else ""
                         ),
                     )
                 )
@@ -644,7 +683,12 @@ class MASAgent:
             raise RuntimeError(
                 "orchestrator_r21 requires non-empty checklist_steps from domains"
             )
-        section = self.prompts.orchestrator_module("Orchestrator Module 1", [])
+        section = self.prompts.orchestrator_module(
+            "Orchestrator Module 1"
+            if self.use_success_criteria
+            else "Orchestrator Module 1 (NoSC)",
+            [],
+        )
         prompt = self._inject_prompt(
             section,
             {
@@ -666,7 +710,9 @@ class MASAgent:
             {
                 "step": s.step,
                 "owner_agent": s.owner_agent,
-                "success_criteria": s.success_criteria or "done",
+                "success_criteria": (
+                    s.success_criteria or "done" if self.use_success_criteria else ""
+                ),
             }
             for s in combined
         ]
@@ -676,6 +722,7 @@ class MASAgent:
             prompt=prompt,
             default_owner="Common",
             require_owner=True,
+            require_success_criteria=self.use_success_criteria,
             fallback_rows=fallback_rows,
         )
         out = []
@@ -690,9 +737,13 @@ class MASAgent:
                     step_id=i,
                     step=step_text,
                     owner_agent=owner,
-                    success_criteria=criteria_map.get(
-                        (owner, step_text.lower()),
-                        str(row.get("success_criteria", "done")) or "done",
+                    success_criteria=(
+                        criteria_map.get(
+                            (owner, step_text.lower()),
+                            str(row.get("success_criteria", "done")) or "done",
+                        )
+                        if self.use_success_criteria
+                        else ""
                     ),
                 )
             )
@@ -703,13 +754,20 @@ class MASAgent:
     def _plan_r3(
         self, domain: str, draft_plan: list[StepSpec], user_query: str
     ) -> dict[str, Any]:
-        section = self.prompts.domain_round("3 Round - Critique", ["Excution"])
+        section = self.prompts.domain_round(
+            "3 Round - Critique"
+            if self.use_success_criteria
+            else "3 Round - Critique (NoSC)",
+            ["Excution"],
+        )
         prompt = self._inject_prompt(
             section,
             {
                 "domain": domain,
                 "user_query": user_query,
-                "draft_master_plan": self._format_plan_steps_for_prompt(draft_plan),
+                "draft_master_plan": self._format_plan_steps_for_prompt(
+                    draft_plan, include_success_criteria=self.use_success_criteria
+                ),
             },
         )
         payload = self.llm.complete_json_strict(
@@ -739,7 +797,11 @@ class MASAgent:
                     step_id=i,
                     step=step.step,
                     owner_agent=step.owner_agent,
-                    success_criteria=step.success_criteria or "done",
+                    success_criteria=(
+                        step.success_criteria or "done"
+                        if self.use_success_criteria
+                        else ""
+                    ),
                 )
             )
         sid = len(normalized) + 1
@@ -754,17 +816,26 @@ class MASAgent:
                         step_id=sid,
                         step=f"Critique update: {text}",
                         owner_agent=agent,
-                        success_criteria="critique-resolved",
+                        success_criteria=(
+                            "critique-resolved" if self.use_success_criteria else ""
+                        ),
                     )
                 )
                 sid += 1
         normalized.extend(extra_steps)
-        section = self.prompts.orchestrator_module("Orchestrator Module 2", [])
+        section = self.prompts.orchestrator_module(
+            "Orchestrator Module 2"
+            if self.use_success_criteria
+            else "Orchestrator Module 2 (NoSC)",
+            [],
+        )
         prompt = self._inject_prompt(
             section,
             {
                 "user_query": query,
-                "draft_master_plan": self._format_plan_steps_for_prompt(draft),
+                "draft_master_plan": self._format_plan_steps_for_prompt(
+                    draft, include_success_criteria=self.use_success_criteria
+                ),
                 "all_agent_round_3_critiques": self._format_critiques_for_prompt(
                     critiques
                 ),
@@ -780,7 +851,9 @@ class MASAgent:
             {
                 "step": s.step,
                 "owner_agent": s.owner_agent,
-                "success_criteria": s.success_criteria or "done",
+                "success_criteria": (
+                    s.success_criteria or "done" if self.use_success_criteria else ""
+                ),
             }
             for s in normalized
         ]
@@ -790,6 +863,7 @@ class MASAgent:
             prompt=prompt,
             default_owner="Common",
             require_owner=True,
+            require_success_criteria=self.use_success_criteria,
             fallback_rows=fallback_rows,
         )
         out = []
@@ -803,7 +877,11 @@ class MASAgent:
                     step_id=i,
                     step=str(row.get("step", "")).strip() or f"final step {i}",
                     owner_agent=owner,
-                    success_criteria=str(row.get("success_criteria", "done")) or "done",
+                    success_criteria=(
+                        str(row.get("success_criteria", "done")) or "done"
+                        if self.use_success_criteria
+                        else ""
+                    ),
                 )
             )
         if not out:
@@ -891,7 +969,11 @@ class MASAgent:
         return rows
 
     @staticmethod
-    def _rows_have_core_fields(rows: list[dict[str, str]], require_owner: bool) -> bool:
+    def _rows_have_core_fields(
+        rows: list[dict[str, str]],
+        require_owner: bool,
+        require_success_criteria: bool = True,
+    ) -> bool:
         if not rows:
             return False
         for row in rows:
@@ -902,7 +984,7 @@ class MASAgent:
                 return False
             if require_owner and not owner:
                 return False
-            if not success or success.lower() == "done":
+            if require_success_criteria and (not success or success.lower() == "done"):
                 return False
         return True
 
@@ -914,6 +996,7 @@ class MASAgent:
         prompt: str,
         default_owner: str = "Common",
         require_owner: bool = False,
+        require_success_criteria: bool = True,
         fallback_rows: list[dict[str, str]] | None = None,
     ) -> list[dict[str, str]]:
         strict_rows: list[dict[str, str]] = []
@@ -934,17 +1017,31 @@ class MASAgent:
         )
         if relaxed_rows:
             return relaxed_rows
-        if self._rows_have_core_fields(strict_rows, require_owner=require_owner):
+        if self._rows_have_core_fields(
+            strict_rows,
+            require_owner=require_owner,
+            require_success_criteria=require_success_criteria,
+        ):
             return strict_rows
 
-        repair_prompt = (
-            prompt
-            + "\n\n[FORMAT REPAIR]\n"
-            + "Re-output ONLY checklist lines in this exact format:\n"
-            + "N. [ ] [OwnerAgent] step description | success_criteria: one short sentence\n"
-            + "Rules: preserve original intent; do not add explanation; do not output JSON/code.\n"
-            + "If owner is required, include [OwnerAgent] on every line."
-        )
+        if require_success_criteria:
+            repair_prompt = (
+                prompt
+                + "\n\n[FORMAT REPAIR]\n"
+                + "Re-output ONLY checklist lines in this exact format:\n"
+                + "N. [ ] [OwnerAgent] step description | success_criteria: one short sentence\n"
+                + "Rules: preserve original intent; do not add explanation; do not output JSON/code.\n"
+                + "If owner is required, include [OwnerAgent] on every line."
+            )
+        else:
+            repair_prompt = (
+                prompt
+                + "\n\n[FORMAT REPAIR]\n"
+                + "Re-output ONLY checklist lines in this exact format:\n"
+                + "N. [ ] [OwnerAgent] step description\n"
+                + "Rules: preserve original intent; do not add explanation; do not output JSON/code.\n"
+                + "If owner is required, include [OwnerAgent] on every line."
+            )
         repaired_text = self.llm.complete(
             repair_prompt, stage=f"{stage}_format_repair"
         ).text
@@ -968,7 +1065,11 @@ class MASAgent:
         except Exception:
             repaired_strict = []
 
-        if self._rows_have_core_fields(repaired_strict, require_owner=require_owner):
+        if self._rows_have_core_fields(
+            repaired_strict,
+            require_owner=require_owner,
+            require_success_criteria=require_success_criteria,
+        ):
             return repaired_strict
         if fallback_rows:
             return fallback_rows
@@ -1024,7 +1125,12 @@ class MASAgent:
         context_handoff: dict[str, Any] | None,
         data_catalog: list[dict[str, Any]],
     ) -> tuple[str, str]:
-        section = self.prompts.domain_round("1 Round - Write and run code", [])
+        section = self.prompts.domain_round(
+            "1 Round - Write and run code"
+            if self.use_success_criteria
+            else "1 Round - Write and run code (NoSC)",
+            [],
+        )
         profile = self.domain_profiles.get(step.owner_agent, {})
         runtime_ctx = self.domain_runtime.get(step.owner_agent, {})
         resolved = runtime_ctx.get("resolved", {})
@@ -1044,7 +1150,11 @@ class MASAgent:
                 ),
                 "user_query": user_query,
                 "current_step_description": step.step,
-                "success_criteria": step.success_criteria,
+                "success_criteria": (
+                    step.success_criteria
+                    if self.use_success_criteria
+                    else "DISABLED (intent-based verification mode)"
+                ),
                 "context_handoff_from_orchestrator": self._format_context_handoff_for_prompt(
                     context_handoff
                 ),
@@ -1157,14 +1267,19 @@ class MASAgent:
         return "\n\n".join(chunks)
 
     @staticmethod
-    def _format_plan_steps_for_prompt(steps: list[StepSpec]) -> str:
+    def _format_plan_steps_for_prompt(
+        steps: list[StepSpec], include_success_criteria: bool = True
+    ) -> str:
         if not steps:
             return "-"
         rows: list[str] = []
         for s in steps:
-            rows.append(
-                f"{s.step_id}. [{s.owner_agent}] {s.step} | success_criteria: {s.success_criteria}"
-            )
+            if include_success_criteria:
+                rows.append(
+                    f"{s.step_id}. [{s.owner_agent}] {s.step} | success_criteria: {s.success_criteria or ''}"
+                )
+            else:
+                rows.append(f"{s.step_id}. [{s.owner_agent}] {s.step}")
         return "\n".join(rows)
 
     @staticmethod
@@ -1192,14 +1307,15 @@ class MASAgent:
                     item_no += 1
         return "\n".join(rows)
 
-    @staticmethod
-    def _format_step_for_prompt(step: StepSpec) -> str:
-        return (
+    def _format_step_for_prompt(self, step: StepSpec) -> str:
+        text = (
             f"step_id: {step.step_id}\n"
             f"owner_agent: {step.owner_agent}\n"
-            f"step: {step.step}\n"
-            f"success_criteria: {step.success_criteria}"
+            f"step: {step.step}"
         )
+        if self.use_success_criteria:
+            text += f"\nsuccess_criteria: {step.success_criteria or ''}"
+        return text
 
     @staticmethod
     def _format_verifier_for_prompt(verifier: VerifierOutput) -> str:
@@ -1329,6 +1445,21 @@ class MASAgent:
         return compact_text(text=text, max_chars=max_chars, max_lines=max_lines)
 
     @staticmethod
+    def _strip_execution_debug_fields(text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        filtered: list[str] = []
+        for line in raw.splitlines():
+            normalized = line.strip().lower()
+            if normalized.startswith("found_records_count"):
+                continue
+            if normalized.startswith("one_sample_result"):
+                continue
+            filtered.append(line)
+        return "\n".join(filtered).strip()
+
+    @staticmethod
     def _format_data_catalog_lines(data_catalog: list[dict[str, Any]]) -> str:
         if not data_catalog:
             return "-"
@@ -1385,7 +1516,12 @@ class MASAgent:
         retry_count: int,
         plan_revision_count: int,
     ) -> dict[str, Any]:
-        section = self.prompts.orchestrator_module("Orchestrator Module 3", [])
+        section = self.prompts.orchestrator_module(
+            "Orchestrator Module 3"
+            if self.use_success_criteria
+            else "Orchestrator Module 3 (NoSC)",
+            [],
+        )
         max_chars = max(120, int(self.runtime.orchestrator_instruction_max_chars))
         prompt = section + "\n\nReturn JSON only with schema: "
         prompt += '{"action":"NEXT|RETRY|PLAN_REVISION|FULL_RESET","instruction":str,"target_step_id":int}.\n'
@@ -1396,6 +1532,7 @@ class MASAgent:
         prompt += (
             f"Current step:\n{self._format_step_for_prompt(step)}\n"
             f"Verifier:\n{self._format_verifier_for_prompt(verifier)}\n"
+            f"Evaluation mode: {'criteria' if self.use_success_criteria else 'intent'}\n"
             f"Retry count: {retry_count}\n"
             f"Plan revision count: {plan_revision_count}\n"
             f"Progress: {len(state.execution_history)}/{len(state.final_master_plan)}\n"
@@ -1440,7 +1577,12 @@ class MASAgent:
     def _verify_step(
         self, step: StepSpec, code: str, observe_output: str
     ) -> VerifierOutput:
-        section = self.prompts.domain_round("2 Round - Verifier", [])
+        section = self.prompts.domain_round(
+            "2 Round - Verifier"
+            if self.use_success_criteria
+            else "2 Round - Verifier (NoSC)",
+            [],
+        )
         profile = self.domain_profiles.get(step.owner_agent, {})
         runtime_hint = ""
         if "Error:" in observe_output or "ERROR:" in observe_output:
@@ -1471,7 +1613,8 @@ class MASAgent:
             stage=f"verifier:{step.owner_agent}:step{step.step_id}",
         )
         user_interaction_blocker = self._is_user_interaction_required_step(
-            step.step, step.success_criteria
+            step.step,
+            step.success_criteria if self.use_success_criteria else None,
         ) or self._is_user_reprompt_output(observe_output)
         if user_interaction_blocker:
             payload["status"] = "PLAN_REVISION"
@@ -1548,8 +1691,11 @@ class MASAgent:
                 max_chars=180,
                 max_lines=1,
             )
+            observed_raw = self._strip_execution_debug_fields(
+                str(row.get("observe_output", "")).strip()
+            )
             observed = self._compact_text(
-                str(row.get("observe_output", "")).strip(),
+                observed_raw,
                 max_chars=260,
                 max_lines=3,
             )
@@ -1563,8 +1709,9 @@ class MASAgent:
             )
 
         if last_output:
+            latest = self._strip_execution_debug_fields(str(last_output))
             lines.append(
-                f"- latest_observation={self._compact_text(str(last_output), max_chars=260, max_lines=3)}"
+                f"- latest_observation={self._compact_text(latest, max_chars=260, max_lines=3)}"
             )
 
         return "\n".join(lines)[: self.runtime.observation_max_chars]
@@ -1575,6 +1722,7 @@ class MASAgent:
         mode: str,
         execution_answer: str,
     ) -> str:
+        execution_answer_clean = self._strip_execution_debug_fields(execution_answer)
         if mode == "no_act":
             prompt = "\n".join(
                 [
@@ -1598,13 +1746,20 @@ class MASAgent:
                 f"mode={mode}",
                 f"user_query={state.user_query}",
             ]
-            if execution_answer:
-                prompt_lines.append(f"execution_result={execution_answer}")
+            if execution_answer_clean:
+                prompt_lines.append(f"execution_result={execution_answer_clean}")
             prompt = "\n".join(prompt_lines) + "\n"
         stage = "synth_no_act" if mode == "no_act" else "synth_act"
         text = self.llm.complete(prompt, stage=stage).text.strip()
         if not text:
-            raise RuntimeError("Synthesizer returned empty response")
+            if execution_answer_clean:
+                fallback = str(execution_answer_clean).strip()
+                if fallback:
+                    return fallback
+            return (
+                "I could not generate a complete answer from the model response. "
+                "Please retry with more specific query details."
+            )
         return text
 
     @staticmethod
@@ -1654,7 +1809,7 @@ class MASAgent:
             f"reason={reason}\n"
             f"immediate_action={immediate_action}\n"
             f"target_step_id={target_step_id}\n"
-            f"preserve_prefix_steps:\n{self._format_plan_steps_for_prompt(preserved_prefix)}"
+            f"preserve_prefix_steps:\n{self._format_plan_steps_for_prompt(preserved_prefix, include_success_criteria=self.use_success_criteria)}"
         )
         for domain in selected_agents:
             runtime_ctx = self.domain_runtime.get(domain, {})
@@ -1856,6 +2011,7 @@ class MASAgent:
             "retry_count": int(state.retry_count),
             "plan_revision_count": int(state.plan_revision_count),
             "full_reset_count": int(state.full_reset_count),
+            "use_success_criteria": bool(self.use_success_criteria),
             "step_latency_summary": step_latency_summary,
         }
         if show_trace:
@@ -2061,6 +2217,32 @@ class MASAgent:
         ]
         return any(k in text for k in mismatch_markers)
 
+    @staticmethod
+    def _is_method_mismatch_issue(
+        reason: str,
+        immediate_action: str,
+        observe_output: str,
+    ) -> bool:
+        text = "\n".join(
+            [
+                str(reason or "").lower(),
+                str(immediate_action or "").lower(),
+                str(observe_output or "").lower(),
+            ]
+        )
+        method_markers = [
+            "method_mismatch",
+            "method mismatch",
+            "approach mismatch",
+            "did not meet",
+            "does not meet",
+            "instead of",
+            "required outputs",
+            "expected outputs",
+            "success criteria",
+        ]
+        return any(k in text for k in method_markers)
+
     def _should_escalate_failure_to_plan_revision(
         self,
         step: StepSpec,
@@ -2069,6 +2251,39 @@ class MASAgent:
         execution_history: list[dict[str, Any]],
     ) -> bool:
         if verifier.status != VerifierStatus.FAILURE:
+            return False
+        if self._is_method_mismatch_issue(
+            reason=verifier.reason,
+            immediate_action=verifier.immediate_action,
+            observe_output=verifier.observe_output,
+        ):
+            if retry_count >= 1:
+                return True
+            current_reason = " ".join(str(verifier.reason).lower().split())
+            for row in reversed(execution_history):
+                if not isinstance(row, dict):
+                    continue
+                if int(row.get("step_id", -1)) != int(step.step_id):
+                    continue
+                prev_verifier = row.get("verifier", {})
+                if not isinstance(prev_verifier, dict):
+                    continue
+                prev_status_raw = prev_verifier.get("status", "")
+                prev_status = str(
+                    getattr(prev_status_raw, "value", prev_status_raw)
+                ).upper()
+                if prev_status.startswith("VERIFIERSTATUS."):
+                    prev_status = prev_status.split(".")[-1]
+                if prev_status != VerifierStatus.FAILURE.value:
+                    continue
+                prev_reason = " ".join(
+                    str(prev_verifier.get("reason", "")).lower().split()
+                )
+                if prev_reason and (
+                    prev_reason == current_reason
+                    or self._is_method_mismatch_issue(prev_reason, "", "")
+                ):
+                    return True
             return False
         if not self._is_schema_identifier_mismatch_issue(
             reason=verifier.reason,
@@ -2097,6 +2312,80 @@ class MASAgent:
                 return True
         return False
 
+    def _downscale_plan_to_available_resources(
+        self, plan: list[StepSpec]
+    ) -> list[StepSpec]:
+        def _names(rows: list[dict[str, Any]], key: str) -> set[str]:
+            out: set[str] = set()
+            for row in rows:
+                name = str(row.get(key, "")).strip().lower()
+                if name:
+                    out.add(name)
+            return out
+
+        def _has_any(names: set[str], markers: list[str]) -> bool:
+            for name in names:
+                if any(m in name for m in markers):
+                    return True
+            return False
+
+        scaled: list[StepSpec] = []
+        for step in plan:
+            runtime_ctx = self.domain_runtime.get(step.owner_agent, {})
+            resolved = runtime_ctx.get("resolved", {})
+            data_names = _names(resolved.get("data_lake", []), "name")
+            tool_names = _names(resolved.get("tools", []), "name")
+
+            has_eqtl = _has_any(data_names, ["eqtl", "gtex"]) or _has_any(
+                tool_names, ["eqtl", "gtex"]
+            )
+            has_pqtl = _has_any(data_names, ["pqtl", "proteinatlas", "proteinatlas"])
+            has_chromatin = _has_any(
+                data_names,
+                ["chromatin", "encode", "chip", "atac", "hic", "3d"],
+            ) or _has_any(tool_names, ["encode", "chromatin", "regulome"])
+            has_finemap = _has_any(
+                tool_names,
+                ["fine", "finemap", "bayesian_finemapping", "credible", "pip"],
+            )
+
+            text = str(step.step or "").strip()
+            lowered = text.lower()
+            missing: list[str] = []
+            if any(k in lowered for k in ["eqtl", "gtex"]):
+                if not has_eqtl:
+                    missing.append("eQTL")
+            if "pqtl" in lowered:
+                if not has_pqtl:
+                    missing.append("pQTL")
+            if any(k in lowered for k in ["chromatin", "chip", "atac", "hic"]):
+                if not has_chromatin:
+                    missing.append("chromatin")
+            if any(
+                k in lowered
+                for k in ["fine-map", "fine map", "fine-mapp", "pip", "credible"]
+            ):
+                if not has_finemap:
+                    missing.append("fine-mapping")
+
+            if missing and text:
+                uniq_missing = sorted(set(missing))
+                rewritten = (
+                    f"Use available local resources for this objective and explicitly report unavailable inputs "
+                    f"({', '.join(uniq_missing)}); provide the best feasible evidence without synthetic data."
+                )
+                text = rewritten
+
+            scaled.append(
+                StepSpec(
+                    step_id=step.step_id,
+                    step=text,
+                    owner_agent=step.owner_agent,
+                    success_criteria=step.success_criteria,
+                )
+            )
+        return scaled
+
     def _emit(
         self,
         state: MASState,
@@ -2105,7 +2394,19 @@ class MASAgent:
         data: dict[str, Any] | None,
         stream: bool,
     ) -> None:
-        event = MessageEvent(label=label, content=content, data=data)
+        allow_solution = "Synthesizer" in str(label)
+        safe_content = (
+            content
+            if allow_solution
+            else re.sub(
+                r"<solution>[\s\S]*?</solution>",
+                "",
+                str(content or ""),
+                flags=re.IGNORECASE,
+            ).strip()
+        )
+        safe_data = data if allow_solution else self._strip_solution_from_payload(data)
+        event = MessageEvent(label=label, content=safe_content, data=safe_data)
         state.messages.append(event)
         stage_snapshot = {}
         if hasattr(self.llm, "get_last_stage_usage_snapshot"):
@@ -2121,10 +2422,11 @@ class MASAgent:
             total_tok = 0
         callback_payload = {
             "label": label,
-            "content": content,
-            "data": data,
+            "content": safe_content,
+            "data": safe_data,
             "workflow_state": state.current_state.value,
             "stage": str(stage_snapshot.get("stage", "")).strip(),
+            "use_success_criteria": bool(self.use_success_criteria),
             "token_usage": {
                 "input": in_tok,
                 "output": out_tok,
@@ -2139,9 +2441,23 @@ class MASAgent:
         if stream:
             stage = str(stage_snapshot.get("stage", "")).strip()
             print(
-                f"{label} {content} "
+                f"{label} {safe_content} "
                 f"(stage: {stage or '-'}, input token: {in_tok}, output token: {out_tok}, total token: {total_tok})"
             )
+
+    @staticmethod
+    def _strip_solution_from_payload(value: Any) -> Any:
+        if isinstance(value, str):
+            return re.sub(
+                r"<solution>[\s\S]*?</solution>", "", value, flags=re.IGNORECASE
+            ).strip()
+        if isinstance(value, list):
+            return [MASAgent._strip_solution_from_payload(x) for x in value]
+        if isinstance(value, dict):
+            return {
+                k: MASAgent._strip_solution_from_payload(v) for k, v in value.items()
+            }
+        return value
 
     @staticmethod
     def _coerce_int(value: Any) -> int | None:
@@ -2494,9 +2810,9 @@ class MASAgent:
 
     @staticmethod
     def _is_user_interaction_required_step(
-        step_text: str, success_criteria: str
+        step_text: str, success_criteria: str | None
     ) -> bool:
-        text = f"{step_text}\n{success_criteria}".lower()
+        text = f"{step_text}\n{success_criteria or ''}".lower()
         keywords = (
             "request additional",
             "ask user",

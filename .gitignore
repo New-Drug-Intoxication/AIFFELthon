@@ -3,3 +3,7 @@ __pycache__/
 .DS_Store
 .env
 data_lake/
+workspace/
+tlfwp.txt
+biomni_101.ipynb
+eval1_test/

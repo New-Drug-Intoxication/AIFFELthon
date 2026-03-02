@@ -54,7 +54,7 @@ class AgentRuntimeConfig:
     timeout_seconds: int = 600
     observation_max_chars: int = 10000
     verbose_default: bool = True
-    json_retries: int = int(os.getenv("MAS_JSON_RETRIES", "0"))
+    json_retries: int = int(os.getenv("MAS_JSON_RETRIES", "2"))
     step_retry_limit: int = 2
     plan_revision_limit: int = 2
     orchestrator_instruction_max_chars: int = int(
@@ -65,3 +65,6 @@ class AgentRuntimeConfig:
     )
     s3_bucket_url: str = os.getenv("MAS_S3_BUCKET_URL", "")
     graph_recursion_limit: int = int(os.getenv("MAS_GRAPH_RECURSION_LIMIT", "80"))
+    use_success_criteria: bool = str(
+        os.getenv("MAS_USE_SUCCESS_CRITERIA", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
