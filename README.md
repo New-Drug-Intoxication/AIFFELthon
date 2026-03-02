@@ -1,131 +1,104 @@
-맨 마지막만 보고 실행? 하면 될 듯 해요
-
 # Biomni_MAS_LG
 
-`Biomni_MAS_LG`는 생의학 문제 해결용 멀티 에이전트 시스템입니다.  
-핵심 오케스트레이션은 LangGraph 상태 그래프로 동작합니다.
+Biomni MAS 기반의 생의학 멀티 에이전트 실행/모니터링 저장소입니다.
 
-## 핵심 흐름
+## 개요
 
-`User Query -> Router -> Plan(R1/R2/R2.1/R3/R3.1) -> Execution(반복) -> Synthesizer`
+핵심 실행 흐름:
 
-- Router: 도메인 선택 + `act_required` 판단
-- Plan: 리소스 선택과 통합 계획 확정
-- Execution: step 실행/검증/재시도/재계획/풀리셋 분기
-- Synthesizer: 실행 근거 기반 최종 응답 생성
+`User Query -> Router -> Plan -> Execution(verify/retry/replan) -> Synthesizer`
 
-## 디렉터리 구조
+주요 엔트리:
 
-- `biomni_mas/`
-  - `agent.py`: public 엔트리(`MASAgent.go`)
-  - `graph/`: LangGraph 노드/엣지/상태
-  - `llm_backend.py`: strict JSON + 토큰 집계
-  - `prompt_store.py`: `prompts/runtime` 로딩
-  - `resource_store.py`: `resources/index/master_index.json` 기반 리소스 조회/resolve
-  - `schemas.py`: 상태/페이로드 스키마
+- `run_mas_agent.py`: 단일 쿼리 CLI 실행
+- `run_mas_web.py`: 웹 모니터 (노드 로그/평가 진행 확인)
+
+## 디렉터리
+
+- `biomni_mas/`: 에이전트/그래프/백엔드 코드
+- `resources/`: 리소스 인덱스/도메인 소스
 - `prompts/runtime/`: 런타임 프롬프트
-- `resources/source/`: 도메인 리소스 원본
-- `resources/index/master_index.json`: 리소스 인덱스
 - `data_lake/`: 분석 데이터 파일
-- `scripts/`: 다운로드/평가/설치 보조 스크립트
-- `run_mas_agent.py`: 단일 쿼리 실행 CLI
+- `scripts/`: 설치/다운로드/평가 보조 스크립트
+- `eval1_test/`: Eval1 웹 모드 실행 결과 산출 디렉터리
 
-## 빠른 실행
+## 빠른 시작
 
-저장소 루트(`Biomni_MAS_LG`)에서:
+저장소 루트에서 실행:
 
 ```bash
-export MAS_S3_BUCKET_URL="https://biomni-release.s3.amazonaws.com"
+conda activate biomni_mas_e1
+pip install -r requirements.txt
+python run_mas_web.py --host 127.0.0.1 --port 8080
+# http://127.0.0.1:8080
+```
+
+단일 쿼리 CLI:
+
+```bash
 python run_mas_agent.py "Plan a genomics analysis for variant prioritization" --stream
 ```
 
-웹 모니터 실행(노드별 로그 실시간 확인):
+## 환경 변수(.env)
 
-```bash
-python run_mas_web.py --host 127.0.0.1 --port 8080
-# 브라우저에서 http://127.0.0.1:8080 접속
-```
+`.env`가 저장소 루트에 있으면 `run_mas_agent.py`, `run_mas_web.py`에서 자동 로드됩니다.
 
-`.env` 자동 로드:
-
-- 저장소 루트(`Biomni_MAS_LG/.env`)가 있으면 `run_mas_agent.py`, `run_mas_web.py` 실행 시 자동 로드됩니다.
-- 예시:
+예시:
 
 ```bash
 MAS_LLM_SOURCE=OpenAI
-MAS_LLM=gpt-4o
-OPENAI_API_KEY=sk-...
+MAS_LLM=gpt-5-mini
+OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>
 MAS_DATA_LAKE_ROOT=data_lake
-# optional: enable OpenAI Responses API (default: false)
+
+# optional
 MAS_OPENAI_USE_RESPONSES_API=false
+ANTHROPIC_API_KEY=<OPTIONAL>
+MAS_CLAUDE_TOOL_MODEL=claude-4-sonnet-latest
 ```
 
-의존성 사전 점검(권장):
+## 의존성 점검
 
 ```bash
-python run_mas_agent.py "Plan a genomics analysis for variant prioritization" \
-  --preflight-deps --preflight-install --stream
+python scripts/preflight_deps.py
+python scripts/preflight_deps.py --install
 ```
 
-- `--preflight-deps`: 도구 모듈 import 사전 점검
-- `--preflight-install`: 누락 패키지 자동 설치(pip)
-- `--preflight-domains Genetics,Common`: 특정 도메인만 점검
-- `--preflight-continue-on-missing`: 누락이 있어도 실행 계속
-
-주의:
-- end-to-end 실행에는 LLM provider 설정/키가 필요합니다.
-- Router/Verifier 등 여러 단계는 strict JSON 출력 계약을 강제합니다.
-
-## macOS 실행 예시
+또는 실행 시 함께:
 
 ```bash
-cd /Users/ohhakgyoun/Desktop/MAS/Biomni_MAS_LG
-
-conda env create -n biomni_mas_e1 -f biomni_mas_env/environment.yml <- 우선 하지 말 것.
-conda activate biomni_mas_e1
-bash biomni_mas_env/setup.sh <- 우선 하지 말 것.
-
-export MAS_LLM="gpt-4o"
-export MAS_LLM_SOURCE="OpenAI"
-export OPENAI_API_KEY="<YOUR_OPENAI_API_KEY>"
-export ANTHROPIC_API_KEY="<YOUR_ANTHROPIC_API_KEY>"
-export MAS_DATA_LAKE_ROOT="data_lake"
-
-python run_mas_agent.py "Plan a genomics analysis for variant prioritization" --stream
+python run_mas_agent.py "Query" --preflight-deps --preflight-install --stream
 ```
 
-설치 실패 확인:
+## Eval1 (Web Monitor)
 
-```bash
-cat generated/failed.python.txt
-cat generated/failed.r.txt
-cat generated/failed.cli.txt
-```
+Web UI에서 `Eval1 mode`를 켜면 task-wise batch 실행이 가능합니다.
 
-## 토큰 집계
+현재 Eval1 split 사용 기준:
 
-실행 결과에 아래 필드가 포함됩니다.
+- `val` 기준 사용 (`train` 가이드 제거)
 
-- `token_usage_by_stage`
-- `token_usage_total`
+### 실행 옵션
 
-집계 우선순위:
-1. provider가 반환한 usage 메타데이터
-2. usage가 없으면 fallback 추정
-   - `tiktoken` 가능 시 tokenizer 기반
-   - 불가 시 문자열 길이 기반 근사치
+- `Per-task limit`: task당 최대 실행 수
+- `Task scope`:
+  - `All tasks`
+  - `Start from task`
+  - `Only selected tasks`
+- `Selected tasks`: 클릭 토글 체크박스
 
-## 재계획/풀리셋 이력
+### 결과 산출물
 
-`replan_history.note`에 분기 결과가 기록됩니다.
+`eval1_test/run_YYYYmmdd_HHMMSS/` 아래 생성:
 
-- `plan_revision_limit_exceeded`
-- `step_retry_limit_exceeded_without_plan_revision`
-- `full_reset_applied`
-- `full_reset_to_no_act`
-- `full_reset_limit_exceeded`
-- `blocked_non_verifier_full_reset`
-- `blocked_non_exception_full_reset`
+- `run_config.json`: 실행 설정
+- `<task>/case_xxxx.py`: 케이스 로그
+- `<task>/case_xxxx.summary.json`: 케이스 요약/채점
+- `<task>/case_xxxx.trace.json`: 실행 트레이스
+- `<task>/case_xxxx.raw_events.jsonl`: raw 이벤트 스트림
+- `<task>/task_summary.json`: task 요약
+- `summary_all_tasks.json|md`: 전체 요약
+- `run_index.json`: 케이스 인덱스
 
 ## Data Lake 다운로드
 
@@ -134,17 +107,11 @@ python scripts/download_data_lake.py --all
 ```
 
 자주 쓰는 옵션:
+
 - `--domain Genomics`
 - `--ids 1,2,3`
 - `--files file1,file2`
 - `--dry-run`
-
-## 평가 실행
-
-```bash
-python scripts/run_mas_eval.py --dry-run --limit 5
-python scripts/run_mas_eval.py --split val --limit 5
-```
 
 ## 인덱스 재생성
 
@@ -154,46 +121,16 @@ python scripts/run_mas_eval.py --split val --limit 5
 python resources/scripts/build_master_index.py
 ```
 
-## Troubleshooting
+## 트러블슈팅
 
 - `LLM strict JSON generation failed ...`
-  - provider 키/모델/출력 포맷(JSON 계약) 점검
+  - 모델/키/JSON 출력 계약 점검
 - 데이터 파일 누락
-  - `MAS_S3_BUCKET_URL` 설정 후 downloader 재실행
-- eval 의존성 누락
-  - `pandas` + parquet 엔진(예: `pyarrow`) 설치
+  - `MAS_DATA_LAKE_ROOT` 경로 확인, downloader 재실행
+- Eval 로딩 실패
+  - `pandas`, parquet 엔진(`pyarrow`), `huggingface_hub` 확인
 
-- tool import 오류 (`No module named ...`)
-  - 먼저 preflight 실행:
-    - `python scripts/preflight_deps.py`
-    - 자동 설치: `python scripts/preflight_deps.py --install`
+## 참고
 
-
-----------------
-# 이거만 보세요!!
-## data_lake 폴더를 만들어서, 거기에 15GB 그거 다운 받아놓으신거 가져오면 됩니다.
-
-# .env 파일 만들어서
-```bash
-MAS_LLM="gpt-5-mini"
-MAS_LLM_SOURCE="OpenAI"
-OPENAI_API_KEY="api 넣을 것"
-ANTHROPIC_API_KEY="넣을 것" # 근데 코드상에서 query tool에서 ANTHROPIC을 안쓰는거 같은데 코드 만들다가 그걸 코덱스가 수정ㅎ서 gpt로 하게끔 한듯한..?
-MAS_CLAUDE_TOOL_MODEL="claude-4-sonnet-latest"
-MAS_DATA_LAKE_ROOT="data_lake"
-```
-
-```bash
-conda activate biomni_mas_e1
-pip install -r requirements.txt
-```
-
-# web은 이거. 제가 결과 보려고 하는거. 아마 여러분에 맞게 다시 바꾸던가 해야할 듯 한...
-```bash
-python run_mas_web.py --host 127.0.0.1 --port 8080
-```
-
-# 이건 터미널에서
-```bash
-python run_msa_agent.py "Query" --preflight-deps --preflight-install --stream 
-```
+- `.pybiomart.sqlite`는 `pybiomart` 캐시 SQLite 파일입니다.
+- `eval1_test/`는 실행 결과 아카이브 용도이므로 커질 수 있습니다.
