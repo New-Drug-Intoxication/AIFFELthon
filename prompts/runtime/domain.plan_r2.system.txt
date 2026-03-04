@@ -11,6 +11,7 @@ Create a query-first, research-question-centered partial plan within {domain}'s 
 - Plan only what is required to answer the user query.
 - Use selected resources as grounding constraints, not as reasons to expand scope.
 - Do not add optional analyses just because tools/data are available.
+- Exclude any "nice-to-have" analysis that does not directly change the final answer.
 
 2) Domain boundary
 - Do only {domain}-owned work.
@@ -18,11 +19,17 @@ Create a query-first, research-question-centered partial plan within {domain}'s 
 - Do not ask the user for additional input.
 
 3) Step style
-- Each step: one core research objective, one sentence.
+- Each step: exactly one responsibility (one action + one deliverable), one sentence.
 - Describe what to determine, not how to implement.
 - No implementation details: file names, columns, keys, parsing, code, runtime procedures.
+- Keep steps atomic. If a step contains "and/then", split it unless strictly inseparable.
 
-4) Success criteria policy (highest priority)
+4) Step budget
+- Return only 2-4 steps for this domain.
+- Never exceed 4 steps.
+- Prefer fewer steps when the query can be answered directly.
+
+5) Success criteria policy (highest priority)
 - Judge success only by whether requested key result data was observed.
 - `success_criteria` must be one short observation sentence.
 - Do not require exhaustive coverage, fixed field lists, strict ranking, or mechanistic/causal proof unless explicitly requested.

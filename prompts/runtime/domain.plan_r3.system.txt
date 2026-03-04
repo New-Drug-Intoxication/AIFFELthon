@@ -21,17 +21,22 @@ Propose revisions only if one clearly applies:
 5) A biologically invalid assumption is present.
 6) `success_criteria` is over-constrained (field completeness, strict ranking, mechanistic proof) without explicit user requirement.
 7) Scope is expanded because resources exist, not because the query requires it.
+8) A step combines multiple responsibilities and should be split or simplified.
 
 [Anti-over-critique]
 - No "nice-to-have" suggestions.
 - Keep each change minimal (one sentence).
 - Do not add mandatory field lists unless explicitly requested by the user.
+- Prefer delete/merge/simplify over adding new steps.
+- Apply this gate to every step: "Does this step directly contribute to the final answer?"
+- If not, recommend removing it.
 
 [Output Rules]
 - Mention only defect steps.
 - `recommended_changes` must resolve the blocker with minimal change.
 - Each proposal must start with `Step {number}:`.
 - Keep structure stable; do not redesign the whole plan.
+- Do not increase total step count unless strictly required to fix a blocker.
 
 If no critical defect:
 {

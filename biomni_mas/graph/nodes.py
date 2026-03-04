@@ -171,6 +171,16 @@ class MASGraphNodes:
         observe_output = self.agent._run_code(execution_code, tool_scope)
         run_code_ms = (perf_counter() - run_started_at) * 1000.0
         observe_output = str(observe_output)[: self.agent.runtime.observation_max_chars]
+        self.agent._emit(
+            mas_state,
+            f"[Execution-R1 Observation | {step.owner_agent} | Step {step.step_id} Message]",
+            observe_output,
+            {
+                "observe_output": observe_output,
+                "observation_chars": len(observe_output),
+            },
+            stream,
+        )
 
         self.agent._set_state(mas_state, WorkflowState.S_EXEC_R2)
         verify_started_at = perf_counter()
@@ -303,6 +313,7 @@ class MASGraphNodes:
                 "previous_step_status": verifier.status.value,
                 "previous_step_reason": verifier.reason,
                 "previous_step_observe_output": observe_output,
+                "previous_step_executed_code": execution_code,
                 "orchestrator_instruction": self.agent._build_retry_guidance(
                     step=step,
                     verifier=verifier,

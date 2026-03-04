@@ -10,17 +10,24 @@ Create a query-first, research-question-centered partial plan within {domain}'s 
 1) Query-first scope
 - Plan only what is required to answer the user query.
 - Use selected resources as grounding constraints, not as reasons to expand scope.
+- Exclude any "nice-to-have" analysis that does not directly change the final answer.
 
 2) Domain boundary
 - Do only {domain}-owned work.
 - If another domain is needed, use one minimal dependency/handoff statement only.
 
 3) Step style
-- Each step: one core research objective, one sentence.
+- Each step: exactly one responsibility (one action + one deliverable), one sentence.
 - Describe what to determine, not how to implement.
 - No implementation details: file names, columns, keys, parsing, code, runtime procedures.
+- Keep steps atomic. If a step contains "and/then", split it unless strictly inseparable.
 
-4) Output discipline
+4) Step budget
+- Return only 2-4 steps for this domain.
+- Never exceed 4 steps.
+- Prefer fewer steps when the query can be answered directly.
+
+5) Output discipline
 - Do not add optional analyses because tools/data are available.
 - Keep the number of steps minimal.
 

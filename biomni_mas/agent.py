@@ -607,6 +607,7 @@ class MASAgent:
                 "revision_instruction": revision_instruction,
             },
         )
+        prompt = self._append_common_plan_guardrails(prompt, domain, stage="plan_r2")
         text = self.llm.complete(prompt, stage=f"plan_r2_text:{domain}").text
         parsed = self._parse_checkbox_steps_with_repair(
             text=text,
@@ -770,6 +771,7 @@ class MASAgent:
                 ),
             },
         )
+        prompt = self._append_common_plan_guardrails(prompt, domain, stage="plan_r3")
         payload = self.llm.complete_json_strict(
             prompt,
             required_keys=["critique", "recommended_changes"],
@@ -887,6 +889,28 @@ class MASAgent:
         if not out:
             return normalized
         return out
+
+    @staticmethod
+    def _append_common_plan_guardrails(prompt: str, domain: str, stage: str) -> str:
+        if str(domain).strip().lower() != "common":
+            return prompt
+        if stage == "plan_r2":
+            return (
+                prompt
+                + "\n\n[Common-Specific Ownership Guardrail]\n"
+                + "- You may own a step only when it is primarily executable using Common-selected resources shown above.\n"
+                + "- Do not claim ownership of domain-specific interpretation/judgment if a specialized selected domain can own it.\n"
+                + "- When needed, frame Common output as support/handoff input for domain-owned downstream steps."
+            )
+        if stage == "plan_r3":
+            return (
+                prompt
+                + "\n\n[Common-Specific Review Guardrail]\n"
+                + "- Critique from the Common perspective only.\n"
+                + "- If a Common-owned step performs domain-specific interpretation/judgment, recommend reassignment to the proper domain owner.\n"
+                + "- Keep Common scope to support/handoff work that is executable with Common-selected resources."
+            )
+        return prompt
 
     @staticmethod
     def _parse_checkbox_steps(
@@ -1194,6 +1218,35 @@ class MASAgent:
             "- Never hardcode absolute machine-local paths (e.g., '/Users/...').\n"
             "- Do not assume '../data_lake'; treat it as unsupported unless explicitly provided.\n"
         )
+        retry_ctx = self._retry_context_for_step(step, context_handoff)
+        if retry_ctx.get("is_retry_same_step"):
+            previous_code = self._compact_text(
+                str(retry_ctx.get("previous_step_executed_code", "")),
+                max_chars=3200,
+                max_lines=220,
+            )
+            previous_reason = self._compact_text(
+                str(retry_ctx.get("previous_step_reason", "")),
+                max_chars=380,
+                max_lines=3,
+            )
+            previous_observe = self._compact_text(
+                str(retry_ctx.get("previous_step_observe_output", "")),
+                max_chars=500,
+                max_lines=4,
+            )
+            prompt += (
+                "\n[Retry Context: Same Step]\n"
+                f"- previous_step_reason: {previous_reason or '-'}\n"
+                f"- previous_step_observe_output: {previous_observe or '-'}\n"
+                "- previous_step_executed_code:\n"
+                f"{previous_code or '-'}\n"
+                "\n[Retry Hard Rules]\n"
+                "- Do NOT copy/paste or minimally rephrase the previous code.\n"
+                "- You MUST modify the failure-causing lines and produce materially changed code.\n"
+                "- Resolve the specific failure reason first, then keep the rest minimal.\n"
+                "- Do not output empty placeholders such as print(\"\") or pass-only code.\n"
+            )
         retries = max(2, self.runtime.json_retries + 2)
         last_reason = "execute_block_missing"
         for attempt in range(retries):
@@ -1365,6 +1418,7 @@ class MASAgent:
         reason = str(context_handoff.get("previous_step_reason", "")).strip()
         obs = str(context_handoff.get("previous_step_observe_output", "")).strip()
         action = str(context_handoff.get("orchestrator_instruction", "")).strip()
+        prev_code = str(context_handoff.get("previous_step_executed_code", "")).strip()
         lines: list[str] = []
         lines.append(f"1. previous_step_id: {sid if sid != '' else '-'}")
         if status:
@@ -1384,9 +1438,39 @@ class MASAgent:
                 text = row.strip()
                 if text:
                     lines.append(f"   - {text}")
+        if prev_code:
+            lines.append("6. previous_step_executed_code: provided")
         if len(lines) == 1 and "previous_step_id" in lines[0]:
             lines.append("2. previous_step_observe_output: -")
         return "\n".join(lines)
+
+    @staticmethod
+    def _retry_context_for_step(
+        step: StepSpec, context_handoff: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        if not isinstance(context_handoff, dict):
+            return {"is_retry_same_step": False}
+        prev_sid = MASAgent._coerce_int(context_handoff.get("previous_step_id"))
+        cur_sid = MASAgent._coerce_int(getattr(step, "step_id", None))
+        prev_status = str(context_handoff.get("previous_step_status", "")).strip().upper()
+        is_retry_same_step = (
+            prev_sid is not None
+            and cur_sid is not None
+            and prev_sid == cur_sid
+            and prev_status == "FAILURE"
+        )
+        return {
+            "is_retry_same_step": is_retry_same_step,
+            "previous_step_reason": str(
+                context_handoff.get("previous_step_reason", "")
+            ).strip(),
+            "previous_step_observe_output": str(
+                context_handoff.get("previous_step_observe_output", "")
+            ).strip(),
+            "previous_step_executed_code": str(
+                context_handoff.get("previous_step_executed_code", "")
+            ).strip(),
+        }
 
     @staticmethod
     def _build_retry_guidance(

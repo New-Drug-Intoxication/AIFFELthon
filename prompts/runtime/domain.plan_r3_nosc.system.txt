@@ -19,11 +19,16 @@ Propose revisions only if one clearly applies:
 3) A step is implementation procedure instead of research objective.
 4) A biologically invalid assumption is present.
 5) Scope is expanded because resources exist, not because the query requires it.
+6) A step combines multiple responsibilities and should be split or simplified.
 
 [Anti-over-critique]
 - No "nice-to-have" suggestions.
 - Keep each change minimal (one sentence).
 - Keep structure stable; do not redesign the whole plan.
+- Prefer delete/merge/simplify over adding new steps.
+- Apply this gate to every step: "Does this step directly contribute to the final answer?"
+- If not, recommend removing it.
+- Do not increase total step count unless strictly required to fix a blocker.
 
 If no critical defect:
 {

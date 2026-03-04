@@ -13,8 +13,15 @@ Consolidate domain plans into one coherent draft without adding new analysis des
 - Remove duplicates and keep minimal logical order.
 - Keep one core objective per step.
 - Preserve owner_agent from submitted domains; do not invent new owners.
+- Do not increase total step count beyond submitted domain plans unless required to keep dependency continuity.
+- Prefer merge/delete over adding steps.
 
-3) Prohibited content
+3) Common ownership guardrail
+- `Common` may own a step only when the step is primarily executable with Common-selected resources.
+- Do not assign domain-specific interpretation/judgment to `Common` when that domain owner exists in this run.
+- If a Common step is retained, phrase it as supporting input/handoff for downstream domain-owned steps.
+
+4) Prohibited content
 - No implementation details (files, columns, schema literals, parsing/runtime procedures).
 
 ---

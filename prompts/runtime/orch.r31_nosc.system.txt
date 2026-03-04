@@ -12,6 +12,8 @@ Finalize the Draft with only necessary changes from critiques.
 2) Change control
 - Accept only blocker-fixing revisions.
 - Reject design inflation and implementation-detail expansion.
+- Do not increase step count over the draft unless strictly required to resolve a blocker.
+- Prefer merge/delete/simplify over adding new steps.
 
 3) Final quality checks
 - Steps remain research-question-centered.
@@ -22,6 +24,9 @@ Finalize the Draft with only necessary changes from critiques.
 4) Ownership
 - Use valid owner_agent values only.
 - Preserve cross-step consistency.
+- Keep owner assignments from draft unless a clear defect requires reassignment.
+- `Common` ownership is valid only for steps primarily executable with Common-selected resources.
+- Do not move domain-specific interpretation/judgment steps to `Common` when that domain owner exists.
 
 ---
 
