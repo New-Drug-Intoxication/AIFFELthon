@@ -42,8 +42,7 @@ def _build_pa_html() -> str:
 
     # Ensure base stream request carries eval_parallelism when PA control exists.
     html = html.replace(
-        '        eval_selected_tasks: selectedTasks.join(","),\n'
-        "      });",
+        '        eval_selected_tasks: selectedTasks.join(","),\n      });',
         '        eval_selected_tasks: selectedTasks.join(","),\n'
         '        eval_parallelism: String(((document.getElementById("evalParallelism") || {}).value || "10")),\n'
         "      });",
@@ -139,9 +138,41 @@ def _build_pa_html() -> str:
     padding-left: 6px;
     margin-bottom: 6px;
   }
+  .worker-case-divider {
+    margin: 8px 0 10px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: #ecfeff;
+    border: 1px solid #99f6e4;
+    color: #134e4a;
+    font-size: 11px;
+    font-weight: 700;
+  }
   .worker-event .label {
     font-weight: 600;
     margin-bottom: 2px;
+  }
+  .worker-event .text {
+    margin-bottom: 4px;
+  }
+  .worker-event .code-label {
+    margin-top: 4px;
+    margin-bottom: 2px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #334155;
+  }
+  .worker-event pre.code-box {
+    margin: 0 0 6px;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #0f172a;
+    overflow-x: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 11px;
+    line-height: 1.45;
   }
 </style>
 <script>
@@ -265,6 +296,50 @@ def _build_pa_html() -> str:
 
   const caseToSlot = new Map();
 
+  function appendContentWithCodeBlocks(root, rawText) {
+    const text = String(rawText || "");
+    const re = /```([a-zA-Z0-9_-]+)?\\n([\\s\\S]*?)```/g;
+    let lastIdx = 0;
+    let match = re.exec(text);
+    while (match) {
+      const start = match.index;
+      const full = match[0] || "";
+      const lang = String(match[1] || "").trim().toLowerCase();
+      const code = String(match[2] || "").replace(/\\s+$/, "");
+
+      if (start > lastIdx) {
+        const plain = text.slice(lastIdx, start).trim();
+        if (plain) {
+          const plainDiv = document.createElement("div");
+          plainDiv.className = "text";
+          plainDiv.textContent = plain;
+          root.appendChild(plainDiv);
+        }
+      }
+
+      const codeLabel = document.createElement("div");
+      codeLabel.className = "code-label";
+      codeLabel.textContent = lang ? `code (${lang})` : "code";
+      root.appendChild(codeLabel);
+
+      const pre = document.createElement("pre");
+      pre.className = "code-box";
+      pre.textContent = code || "(empty code block)";
+      root.appendChild(pre);
+
+      lastIdx = start + full.length;
+      match = re.exec(text);
+    }
+
+    const tail = text.slice(lastIdx).trim();
+    if (tail || root.children.length === 0) {
+      const tailDiv = document.createElement("div");
+      tailDiv.className = "text";
+      tailDiv.textContent = tail || "(empty)";
+      root.appendChild(tailDiv);
+    }
+  }
+
   function appendWorkerEvent(payload) {
     if (!payload || typeof payload !== "object") return false;
     const d = payload.data && typeof payload.data === "object" ? payload.data : {};
@@ -285,7 +360,10 @@ def _build_pa_html() -> str:
     const isCaseStart = String(payload.label || "").includes("Eval1 Case Start");
     const prevCase = String(events.dataset.currentCase || "");
     if (isCaseStart && caseId && prevCase !== caseId) {
-      events.innerHTML = "";
+      const divider = document.createElement("div");
+      divider.className = "worker-case-divider";
+      divider.textContent = `Case Start: ${caseId}`;
+      events.appendChild(divider);
     }
     if (caseId) {
       events.dataset.currentCase = caseId;
@@ -298,10 +376,8 @@ def _build_pa_html() -> str:
     const label = document.createElement("div");
     label.className = "label";
     label.textContent = String(payload.label || "event");
-    const body = document.createElement("div");
-    body.textContent = String(payload.content || "").trim() || "(empty)";
     item.appendChild(label);
-    item.appendChild(body);
+    appendContentWithCodeBlocks(item, payload.content || "");
     events.appendChild(item);
     events.scrollTop = events.scrollHeight;
     return true;
@@ -964,9 +1040,9 @@ class ParallelMASWebHandler(base.MASWebHandler):
         try:
             ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
             iterator = iter(enumerate(selected, start=1))
-            pending: set[concurrent.futures.Future] = set()
+            pending: set[concurrent.futures.Future[dict[str, Any]]] = set()
             future_meta: dict[
-                concurrent.futures.Future, tuple[int, dict[str, Any]]
+                concurrent.futures.Future[dict[str, Any]], tuple[int, dict[str, Any]]
             ] = {}
 
             for _ in range(workers):
