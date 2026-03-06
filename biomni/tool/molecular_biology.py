@@ -12,6 +12,16 @@ from Bio.SeqUtils import MeltingTemp as mt
 from bs4 import BeautifulSoup
 
 
+_DEFAULT_ENTREZ_EMAIL = (
+    os.getenv("BIO_ENTREZ_EMAIL", "").strip()
+    or os.getenv("NCBI_EMAIL", "").strip()
+    or os.getenv("ENTREZ_EMAIL", "").strip()
+)
+
+if _DEFAULT_ENTREZ_EMAIL:
+    Entrez.email = _DEFAULT_ENTREZ_EMAIL
+
+
 def annotate_open_reading_frames(sequence, min_length, search_reverse=False, filter_subsets=False):
     """Find all Open Reading Frames (ORFs) in a DNA sequence using Biopython.
     Searches both forward and reverse complement strands.
@@ -290,6 +300,8 @@ def get_gene_coding_sequence(gene_name: str, organism: str, email: str = None) -
     """
     if email:
         Entrez.email = email
+    elif _DEFAULT_ENTREZ_EMAIL and not Entrez.email:
+        Entrez.email = _DEFAULT_ENTREZ_EMAIL
 
     def search_gene() -> str:
         """Search for gene ID in NCBI database."""

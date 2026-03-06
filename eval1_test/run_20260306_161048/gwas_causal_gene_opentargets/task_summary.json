@@ -1,0 +1,55 @@
+{
+  "task_name": "gwas_causal_gene_opentargets",
+  "executed": 3,
+  "effective_limit": 3,
+  "available": 50,
+  "limit": 3,
+  "correct": 3,
+  "partial": 0,
+  "incorrect": 0,
+  "latencies_sec": [
+    7.994711,
+    21.041633,
+    140.92005
+  ],
+  "tokens_total": [
+    0,
+    0,
+    0
+  ],
+  "cases": [
+    {
+      "task_instance_id": 619,
+      "instance_id": 334,
+      "grade": "correct",
+      "grade_reason": "score=1.0",
+      "case_file": "gwas_causal_gene_opentargets/case_0619.json",
+      "summary_file": "gwas_causal_gene_opentargets/case_0619.summary.json",
+      "raw_events_file": "gwas_causal_gene_opentargets/case_0619.raw_events.jsonl",
+      "query_to_final_sec": 7.994711,
+      "total_tokens": 0
+    },
+    {
+      "task_instance_id": 760,
+      "instance_id": 335,
+      "grade": "correct",
+      "grade_reason": "score=1.0",
+      "case_file": "gwas_causal_gene_opentargets/case_0760.json",
+      "summary_file": "gwas_causal_gene_opentargets/case_0760.summary.json",
+      "raw_events_file": "gwas_causal_gene_opentargets/case_0760.raw_events.jsonl",
+      "query_to_final_sec": 21.041633,
+      "total_tokens": 0
+    },
+    {
+      "task_instance_id": 767,
+      "instance_id": 333,
+      "grade": "correct",
+      "grade_reason": "score=1.0",
+      "case_file": "gwas_causal_gene_opentargets/case_0767.json",
+      "summary_file": "gwas_causal_gene_opentargets/case_0767.summary.json",
+      "raw_events_file": "gwas_causal_gene_opentargets/case_0767.raw_events.jsonl",
+      "query_to_final_sec": 140.92005,
+      "total_tokens": 0
+    }
+  ]
+}

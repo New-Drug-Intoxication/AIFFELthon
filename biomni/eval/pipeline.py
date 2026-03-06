@@ -414,7 +414,67 @@ def _compute_step_token_usage(agent: Any, prompt: str, model_name: str | None = 
         "total_completion_tokens": total_completion_tokens,
         "total_tokens": total_tokens,
         "step_count": len(steps),
+        "source": "conversation_estimate",
     }
+
+
+def _compute_runtime_token_usage(agent: Any) -> dict[str, Any] | None:
+    getter = getattr(agent, "get_token_usage_snapshot", None)
+    if not callable(getter):
+        return None
+
+    try:
+        snapshot = getter()
+    except Exception:
+        return None
+
+    if not isinstance(snapshot, dict):
+        return None
+
+    total = snapshot.get("total", {})
+    calls = snapshot.get("calls", [])
+    by_component = snapshot.get("by_component", {})
+    if not isinstance(total, dict):
+        return None
+
+    prompt_tokens = _to_int(total.get("prompt_tokens")) or 0
+    completion_tokens = _to_int(total.get("completion_tokens")) or 0
+    total_tokens = _to_int(total.get("total_tokens")) or 0
+    if total_tokens == 0:
+        total_tokens = prompt_tokens + completion_tokens
+
+    normalized_calls: list[dict[str, Any]] = []
+    if isinstance(calls, list):
+        for idx, item in enumerate(calls, start=1):
+            if not isinstance(item, dict):
+                continue
+            normalized_calls.append(
+                {
+                    "step": _to_int(item.get("call")) or idx,
+                    "component": str(item.get("component", "")),
+                    "prompt_tokens": _to_int(item.get("prompt_tokens")) or 0,
+                    "completion_tokens": _to_int(item.get("completion_tokens")) or 0,
+                    "total_tokens": _to_int(item.get("total_tokens")) or 0,
+                    "estimated": bool(item.get("estimated", False)),
+                }
+            )
+
+    return {
+        "steps": normalized_calls,
+        "total_prompt_tokens": prompt_tokens,
+        "total_completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "step_count": len(normalized_calls),
+        "by_component": by_component if isinstance(by_component, dict) else {},
+        "source": "runtime_tracker",
+    }
+
+
+def _compute_token_usage(agent: Any, prompt: str, model_name: str | None = None) -> dict[str, Any]:
+    runtime_usage = _compute_runtime_token_usage(agent)
+    if runtime_usage is not None:
+        return runtime_usage
+    return _compute_step_token_usage(agent, prompt, model_name=model_name)
 
 
 def _canonicalize_letter_answer(task_name: str, text: str, valid_options: list[str] | None = None) -> str:
@@ -1013,6 +1073,9 @@ class EvaluationPipeline:
 
         success_count = 0
         total_score = 0.0
+        total_tokens_sum = 0
+        total_prompt_tokens_sum = 0
+        total_completion_tokens_sum = 0
 
         for i, instance in enumerate(instances):
             pbar.write(f"[{task_name}] Processing instance {i + 1}/{len(instances)} (ID: {instance['instance_id']})")
@@ -1043,6 +1106,15 @@ class EvaluationPipeline:
                 if isinstance(run_result, dict):
                     result_data = run_result
                 else:
+                    timeout_model_name = None
+                    timeout_llm_obj = getattr(agent, "llm", None)
+                    if timeout_llm_obj is not None:
+                        timeout_model_name = getattr(timeout_llm_obj, "model_name", None)
+                    timeout_token_usage = _compute_token_usage(
+                        agent,
+                        instance["prompt"],
+                        model_name=timeout_model_name,
+                    )
                     timeout_seconds = hard_timeout
                     elapsed = None
                     if isinstance(run_result, str):
@@ -1076,10 +1148,12 @@ class EvaluationPipeline:
                             "patient_gene_local_kg_prediction_score": None,
                             "raw_response_type": type(run_result).__name__,
                             "normalized_prediction_len": 0,
-                            "token_steps": None,
-                            "token_prompt_total": None,
-                            "token_completion_total": None,
-                            "token_total": None,
+                            "token_steps": timeout_token_usage.get("steps"),
+                            "token_prompt_total": timeout_token_usage.get("total_prompt_tokens"),
+                            "token_completion_total": timeout_token_usage.get("total_completion_tokens"),
+                            "token_total": timeout_token_usage.get("total_tokens"),
+                            "token_usage_source": timeout_token_usage.get("source"),
+                            "token_usage_by_component": timeout_token_usage.get("by_component"),
                         },
                     }
                     if elapsed is None:
@@ -1094,6 +1168,10 @@ class EvaluationPipeline:
             if result_data["success"]:
                 success_count += 1
             total_score += result_data["score"]
+            result_metrics = result_data.get("metrics") or {}
+            total_tokens_sum += int(result_metrics.get("token_total") or 0)
+            total_prompt_tokens_sum += int(result_metrics.get("token_prompt_total") or 0)
+            total_completion_tokens_sum += int(result_metrics.get("token_completion_total") or 0)
             pbar.update(1)
 
         if instances:
@@ -1101,9 +1179,15 @@ class EvaluationPipeline:
                 f"{task_name}/accuracy": success_count / len(instances),
                 f"{task_name}/avg_score": total_score / len(instances),
                 f"{task_name}/count": len(instances),
+                f"{task_name}/avg_tokens": total_tokens_sum / len(instances),
+                f"{task_name}/avg_prompt_tokens": total_prompt_tokens_sum / len(instances),
+                f"{task_name}/avg_completion_tokens": total_completion_tokens_sum / len(instances),
             }
             self.logger.log_metrics(task_metrics)
-            pbar.write(f"Task {task_name} finished. Accuracy: {task_metrics[f'{task_name}/accuracy']:.2f}")
+            pbar.write(
+                f"Task {task_name} finished. Accuracy: {task_metrics[f'{task_name}/accuracy']:.2f}, "
+                f"Avg tokens: {task_metrics[f'{task_name}/avg_tokens']:.1f}"
+            )
 
             return {
                 "task_name": task_name,
@@ -1111,6 +1195,9 @@ class EvaluationPipeline:
                 "accuracy": task_metrics[f"{task_name}/accuracy"],
                 "avg_score": task_metrics[f"{task_name}/avg_score"],
                 "successes": success_count,
+                "avg_tokens": task_metrics[f"{task_name}/avg_tokens"],
+                "avg_prompt_tokens": task_metrics[f"{task_name}/avg_prompt_tokens"],
+                "avg_completion_tokens": task_metrics[f"{task_name}/avg_completion_tokens"],
             }
 
         return {
@@ -1119,6 +1206,9 @@ class EvaluationPipeline:
             "accuracy": 0.0,
             "avg_score": 0.0,
             "successes": 0,
+            "avg_tokens": 0.0,
+            "avg_prompt_tokens": 0.0,
+            "avg_completion_tokens": 0.0,
         }
 
     def _print_summary(self, task_summaries: list[dict[str, Any]]):
@@ -1134,7 +1224,8 @@ class EvaluationPipeline:
             print(
                 f"{task_name}: accuracy={item['accuracy']:.4f} "
                 f"({item['successes']}/{item['instances']}), "
-                f"avg_score={item['avg_score']:.4f}"
+                f"avg_score={item['avg_score']:.4f}, "
+                f"avg_tokens={item.get('avg_tokens', 0.0):.1f}"
             )
 
         overall_accuracy = (total_success / total_instances) if total_instances else 0.0
@@ -1329,10 +1420,11 @@ class EvaluationPipeline:
         if llm_obj is not None:
             model_name = getattr(llm_obj, "model_name", None)
 
-        token_usage = _compute_step_token_usage(agent, prompt, model_name=model_name)
+        token_usage = _compute_token_usage(agent, prompt, model_name=model_name)
         if token_usage.get("step_count"):
             print(
                 f"[token] task={task_name} instance={instance['instance_id']} "
+                f"source={token_usage.get('source', 'unknown')} "
                 f"steps={token_usage['step_count']} "
                 f"prompt_tokens={token_usage['total_prompt_tokens']} "
                 f"completion_tokens={token_usage['total_completion_tokens']} "
@@ -1341,7 +1433,9 @@ class EvaluationPipeline:
             for step in token_usage["steps"]:
                 print(
                     f"[token-step] task={task_name} instance={instance['instance_id']} "
-                    f"step={step['step']} prompt={step['prompt_tokens']} "
+                    f"step={step['step']} "
+                    f"component={step.get('component', '-') or '-'} "
+                    f"prompt={step['prompt_tokens']} "
                     f"completion={step['completion_tokens']} total={step['total_tokens']}"
                 )
 
@@ -1390,5 +1484,7 @@ class EvaluationPipeline:
                 "token_prompt_total": token_usage.get("total_prompt_tokens"),
                 "token_completion_total": token_usage.get("total_completion_tokens"),
                 "token_total": token_usage.get("total_tokens"),
+                "token_usage_source": token_usage.get("source"),
+                "token_usage_by_component": token_usage.get("by_component"),
             },
         }

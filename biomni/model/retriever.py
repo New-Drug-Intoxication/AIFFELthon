@@ -4,6 +4,7 @@ import re
 import os
 import time
 from datetime import datetime
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -12,7 +13,7 @@ from langchain_openai import ChatOpenAI
 class ToolRetriever:
     """Retrieve tools from the tool registry."""
 
-    def __init__(self):
+    def __init__(self, token_tracker: Any | None = None):
         self._llm_call_log_path = os.getenv("BIOMNI_LLM_CALL_LOG_PATH", "").strip() or None
         raw_max_chars = os.getenv("BIOMNI_LLM_CALL_LOG_MAX_CHARS", "").strip()
         try:
@@ -20,6 +21,7 @@ class ToolRetriever:
         except ValueError:
             self._llm_call_log_max_chars = 12000
         self._llm_call_logging_enabled = bool(self._llm_call_log_path)
+        self._token_tracker = token_tracker
 
     @staticmethod
     def _truncate_text(value: str, max_chars: int | None = None) -> str:
@@ -85,6 +87,13 @@ class ToolRetriever:
                 response = str(llm(prompt))
             elapsed = time.perf_counter() - start
             self._log_llm_call(prompt, response, elapsed, error=None)
+            if self._token_tracker is not None:
+                self._token_tracker.record_call(
+                    "tool_retriever.prompt_based_retrieval",
+                    prompt,
+                    response,
+                    model_name=getattr(llm, "model_name", None),
+                )
             return response
         except Exception as e:
             elapsed = time.perf_counter() - start

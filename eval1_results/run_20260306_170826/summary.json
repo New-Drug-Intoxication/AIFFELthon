@@ -1,0 +1,23 @@
+{
+  "split": "val",
+  "task_limit": 1,
+  "parallelism": 1,
+  "scope": "selected",
+  "tasks": [
+    "crispr_delivery"
+  ],
+  "results": [
+    {
+      "task_name": "crispr_delivery",
+      "done": 1,
+      "available": 10,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 0,
+      "avg_latency": 30.9,
+      "std_latency": 0.0,
+      "avg_tokens": 392,
+      "std_tokens": 0
+    }
+  ]
+}

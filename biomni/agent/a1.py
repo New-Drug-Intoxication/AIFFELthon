@@ -20,6 +20,7 @@ from biomni.config import default_config
 from biomni.know_how import KnowHowLoader
 from biomni.llm import SourceType, get_llm
 from biomni.model.retriever import ToolRetriever
+from biomni.token_tracker import TokenUsageTracker
 from biomni.tool.support_tools import run_python_repl
 from biomni.tool.tool_registry import ToolRegistry
 from biomni.utils import (
@@ -278,6 +279,9 @@ class A1:
             api_key=api_key,
             config=default_config,
         )
+        self.token_tracker = TokenUsageTracker(
+            model_name=getattr(self.llm, "model_name", None) or llm
+        )
         self.module2api = module2api
         self.use_tool_retriever = use_tool_retriever
 
@@ -294,7 +298,7 @@ class A1:
 
         if self.use_tool_retriever:
             self.tool_registry = ToolRegistry(module2api)
-            self.retriever = ToolRetriever()
+            self.retriever = ToolRetriever(token_tracker=self.token_tracker)
 
         # Initialize know-how loader
         self.know_how_loader = KnowHowLoader()
@@ -447,11 +451,35 @@ class A1:
             response = llm_obj.invoke(prompt_messages)
             elapsed = time.perf_counter() - start
             self._log_llm_call(component, prompt_messages, response, elapsed, error=None)
+            if getattr(self, "token_tracker", None) is not None:
+                self.token_tracker.record_call(
+                    component,
+                    prompt_messages,
+                    response,
+                    model_name=getattr(llm_obj, "model_name", None),
+                )
             return response
         except Exception as e:
             elapsed = time.perf_counter() - start
             self._log_llm_call(component, prompt_messages, None, elapsed, error=str(e))
             raise
+
+    def reset_token_usage(self) -> None:
+        if getattr(self, "token_tracker", None) is not None:
+            self.token_tracker.reset()
+
+    def get_token_usage_snapshot(self) -> dict[str, Any]:
+        if getattr(self, "token_tracker", None) is not None:
+            return self.token_tracker.get_snapshot()
+        return {
+            "calls": [],
+            "by_component": {},
+            "total": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        }
 
     @staticmethod
     def _get_tool_call_budget() -> int:
@@ -2089,6 +2117,7 @@ Each library is listed with its description to help you understand its functiona
         """
         self.critic_count = 0
         self.user_task = prompt
+        self.reset_token_usage()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
@@ -2134,6 +2163,7 @@ Each library is listed with its description to help you understand its functiona
         """
         self.critic_count = 0
         self.user_task = prompt
+        self.reset_token_usage()
 
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)

@@ -1,0 +1,15 @@
+{
+  "task_name": "gwas_causal_gene_pharmaprojects",
+  "task_instance_id": 1588,
+  "instance_id": 195,
+  "query": "Your task is to identify likely causal genes within a locus for a given GWAS phenotype. From the list, provide only the likely causal gene (matching one of the given genes). \nIdentify the causal gene.\nGWAS phenotype: Myeloproliferative Disorders\nGenes in locus: {C4orf48},{ENSG00000290263},{FAM53A},{FGFR3},{HAUS3},{LETM1},{MAEA},{MXD4},{NAT8L},{NELFA},{NKX1-1},{NSD2},{POLN},{SLBP},{TACC3},{TMEM129},{UVSSA},{ZFYVE28}\n",
+  "final_answer": "MAEA",
+  "ground_truth": "FGFR3",
+  "grade": "incorrect",
+  "grade_reason": "score=0.0",
+  "query_to_final_ms": 36555.789,
+  "query_to_final_sec": 36.555789,
+  "run_error": "",
+  "query_start_ts": "2026-03-06T16:10:48.525",
+  "final_answer_ts": "2026-03-06T16:11:25.080"
+}

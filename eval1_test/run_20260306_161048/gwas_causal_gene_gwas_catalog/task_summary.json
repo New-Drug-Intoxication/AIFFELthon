@@ -1,0 +1,55 @@
+{
+  "task_name": "gwas_causal_gene_gwas_catalog",
+  "executed": 3,
+  "effective_limit": 3,
+  "available": 50,
+  "limit": 3,
+  "correct": 1,
+  "partial": 0,
+  "incorrect": 2,
+  "latencies_sec": [
+    13.351397,
+    13.63646,
+    13.897593
+  ],
+  "tokens_total": [
+    0,
+    0,
+    0
+  ],
+  "cases": [
+    {
+      "task_instance_id": 541,
+      "instance_id": 385,
+      "grade": "correct",
+      "grade_reason": "score=1.0",
+      "case_file": "gwas_causal_gene_gwas_catalog/case_0541.json",
+      "summary_file": "gwas_causal_gene_gwas_catalog/case_0541.summary.json",
+      "raw_events_file": "gwas_causal_gene_gwas_catalog/case_0541.raw_events.jsonl",
+      "query_to_final_sec": 13.351397,
+      "total_tokens": 0
+    },
+    {
+      "task_instance_id": 591,
+      "instance_id": 384,
+      "grade": "incorrect",
+      "grade_reason": "score=0.0",
+      "case_file": "gwas_causal_gene_gwas_catalog/case_0591.json",
+      "summary_file": "gwas_causal_gene_gwas_catalog/case_0591.summary.json",
+      "raw_events_file": "gwas_causal_gene_gwas_catalog/case_0591.raw_events.jsonl",
+      "query_to_final_sec": 13.63646,
+      "total_tokens": 0
+    },
+    {
+      "task_instance_id": 630,
+      "instance_id": 383,
+      "grade": "incorrect",
+      "grade_reason": "score=0.0",
+      "case_file": "gwas_causal_gene_gwas_catalog/case_0630.json",
+      "summary_file": "gwas_causal_gene_gwas_catalog/case_0630.summary.json",
+      "raw_events_file": "gwas_causal_gene_gwas_catalog/case_0630.raw_events.jsonl",
+      "query_to_final_sec": 13.897593,
+      "total_tokens": 0
+    }
+  ]
+}

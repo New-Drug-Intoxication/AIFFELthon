@@ -1,0 +1,120 @@
+{
+  "split": "val",
+  "task_limit": 1,
+  "parallelism": 10,
+  "scope": "all",
+  "tasks": [
+    "crispr_delivery",
+    "gwas_causal_gene_gwas_catalog",
+    "gwas_causal_gene_opentargets",
+    "gwas_causal_gene_pharmaprojects",
+    "gwas_variant_prioritization",
+    "lab_bench_dbqa",
+    "lab_bench_seqqa",
+    "patient_gene_detection",
+    "rare_disease_diagnosis",
+    "screen_gene_retrieval"
+  ],
+  "results": [
+    {
+      "task_name": "crispr_delivery",
+      "done": 1,
+      "available": 10,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 0,
+      "avg_latency": 44.9,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "gwas_causal_gene_gwas_catalog",
+      "done": 1,
+      "available": 50,
+      "correct": 0,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 196.6,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "gwas_causal_gene_opentargets",
+      "done": 1,
+      "available": 50,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 0,
+      "avg_latency": 36.5,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "gwas_causal_gene_pharmaprojects",
+      "done": 1,
+      "available": 50,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 0,
+      "avg_latency": 148.6,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "gwas_variant_prioritization",
+      "done": 1,
+      "available": 43,
+      "correct": 0,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 215.6,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "lab_bench_dbqa",
+      "done": 1,
+      "available": 50,
+      "correct": 0,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 167.0,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "lab_bench_seqqa",
+      "done": 1,
+      "available": 50,
+      "correct": 0,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 148.6,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "patient_gene_detection",
+      "done": 1,
+      "available": 50,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 0,
+      "avg_latency": 40.8,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "rare_disease_diagnosis",
+      "done": 1,
+      "available": 30,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 0,
+      "avg_latency": 311.1,
+      "std_latency": 0.0
+    },
+    {
+      "task_name": "screen_gene_retrieval",
+      "done": 1,
+      "available": 50,
+      "correct": 0,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 183.1,
+      "std_latency": 0.0
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "task_name": "lab_bench_dbqa",
+  "task_instance_id": 295,
+  "instance_id": 285,
+  "query": "The following is a multiple choice question about biology.\nPlease answer by responding with the letter of the correct answer.\n\nQuestion: According to ClinVar, which of the following variants to the following sequence (bracketed by xml tags) is most likely to be benign? <sequence>MPSSVSWGILLLAGLCCLVPVSLAEDPQGDAAQKTDTSHHDQDHPTFNKITPNLAEFAFSLYRQLAHQSNSTNIFFSPVSIATAFAMLSLGTKADTHDEILEGLNFNLTEIPEAQIHEGFQELLRTLNQPDSQLQLTTGNGLFLSEGLKLVDKFLEDVKKLYHSEAFTVNFGDTEEAKKQINDYVEKGTQGKIVDLVKELDRDTVFALVNYIFFKGKWERPFEVKDTEEEDFHVDQVTTVKVPMMKRLGMFNIQHCKKLSSWVLLMKYLGNATAIFFLPDEGKLQHLENELTHDIITKFLENEDRRSASLHLPKLSITGTYDLKSVLGQLGITKVFSNGADLSGVTEEAPLKLSKAVHKAVLTIDEKGTEAAGAMFLEAIPMSIPPEVKFNKPFVFLMIEQNTKSPLFMGKVVNPTQK</sequence> \nOptions:\nA.S77F\nB.E366K\nC.D280V\nD.E400D\nE.Insufficient information to answer the question.\n\nYou MUST include the letter of the correct answer within the following tags:\n[ANSWER] and [/ANSWER]. For example, '[ANSWER]<answer>[/ANSWER]',\nwhere <answer> is the correct letter. Always answer in exactly this format\nof a single letter between the two tags, even if you are unsure.\nWe require this because we use automatic parsing.\n            ",
+  "final_answer": "E",
+  "ground_truth": "D",
+  "grade": "incorrect",
+  "grade_reason": "score=0.0",
+  "query_to_final_ms": 37550.251000000004,
+  "query_to_final_sec": 37.550251,
+  "run_error": "",
+  "query_start_ts": "2026-03-06T16:10:48.526",
+  "final_answer_ts": "2026-03-06T16:11:26.076"
+}

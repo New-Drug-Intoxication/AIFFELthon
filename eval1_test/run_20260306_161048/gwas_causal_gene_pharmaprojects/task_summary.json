@@ -1,0 +1,55 @@
+{
+  "task_name": "gwas_causal_gene_pharmaprojects",
+  "executed": 3,
+  "effective_limit": 3,
+  "available": 50,
+  "limit": 3,
+  "correct": 2,
+  "partial": 0,
+  "incorrect": 1,
+  "latencies_sec": [
+    7.188806,
+    11.109342,
+    36.555789
+  ],
+  "tokens_total": [
+    0,
+    0,
+    0
+  ],
+  "cases": [
+    {
+      "task_instance_id": 959,
+      "instance_id": 194,
+      "grade": "correct",
+      "grade_reason": "score=1.0",
+      "case_file": "gwas_causal_gene_pharmaprojects/case_0959.json",
+      "summary_file": "gwas_causal_gene_pharmaprojects/case_0959.summary.json",
+      "raw_events_file": "gwas_causal_gene_pharmaprojects/case_0959.raw_events.jsonl",
+      "query_to_final_sec": 7.188806,
+      "total_tokens": 0
+    },
+    {
+      "task_instance_id": 1475,
+      "instance_id": 193,
+      "grade": "correct",
+      "grade_reason": "score=1.0",
+      "case_file": "gwas_causal_gene_pharmaprojects/case_1475.json",
+      "summary_file": "gwas_causal_gene_pharmaprojects/case_1475.summary.json",
+      "raw_events_file": "gwas_causal_gene_pharmaprojects/case_1475.raw_events.jsonl",
+      "query_to_final_sec": 11.109342,
+      "total_tokens": 0
+    },
+    {
+      "task_instance_id": 1588,
+      "instance_id": 195,
+      "grade": "incorrect",
+      "grade_reason": "score=0.0",
+      "case_file": "gwas_causal_gene_pharmaprojects/case_1588.json",
+      "summary_file": "gwas_causal_gene_pharmaprojects/case_1588.summary.json",
+      "raw_events_file": "gwas_causal_gene_pharmaprojects/case_1588.raw_events.jsonl",
+      "query_to_final_sec": 36.555789,
+      "total_tokens": 0
+    }
+  ]
+}

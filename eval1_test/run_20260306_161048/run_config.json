@@ -1,0 +1,10 @@
+{
+  "mode": "eval1",
+  "split": "val",
+  "per_task_limit": 3,
+  "parallelism": 32,
+  "task_scope": "all",
+  "start_task": "",
+  "selected_tasks": [],
+  "started_at": "2026-03-06T16:10:48"
+}

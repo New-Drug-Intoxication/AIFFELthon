@@ -1,0 +1,55 @@
+{
+  "task_name": "crispr_delivery",
+  "executed": 3,
+  "effective_limit": 3,
+  "available": 10,
+  "limit": 3,
+  "correct": 1,
+  "partial": 0,
+  "incorrect": 2,
+  "latencies_sec": [
+    5.612655,
+    6.419747,
+    8.273072
+  ],
+  "tokens_total": [
+    0,
+    0,
+    0
+  ],
+  "cases": [
+    {
+      "task_instance_id": 18,
+      "instance_id": 275,
+      "grade": "incorrect",
+      "grade_reason": "score=0.0",
+      "case_file": "crispr_delivery/case_0018.json",
+      "summary_file": "crispr_delivery/case_0018.summary.json",
+      "raw_events_file": "crispr_delivery/case_0018.raw_events.jsonl",
+      "query_to_final_sec": 5.612655,
+      "total_tokens": 0
+    },
+    {
+      "task_instance_id": 10,
+      "instance_id": 273,
+      "grade": "correct",
+      "grade_reason": "score=1.0",
+      "case_file": "crispr_delivery/case_0010.json",
+      "summary_file": "crispr_delivery/case_0010.summary.json",
+      "raw_events_file": "crispr_delivery/case_0010.raw_events.jsonl",
+      "query_to_final_sec": 6.419747,
+      "total_tokens": 0
+    },
+    {
+      "task_instance_id": 22,
+      "instance_id": 274,
+      "grade": "incorrect",
+      "grade_reason": "score=0.0",
+      "case_file": "crispr_delivery/case_0022.json",
+      "summary_file": "crispr_delivery/case_0022.summary.json",
+      "raw_events_file": "crispr_delivery/case_0022.raw_events.jsonl",
+      "query_to_final_sec": 8.273072,
+      "total_tokens": 0
+    }
+  ]
+}
