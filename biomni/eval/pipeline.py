@@ -93,6 +93,43 @@ def _extract_solution_text(text: str) -> str:
     return match.group(1).strip()
 
 
+def _extract_solution_only(answer_text: Any) -> tuple[str, bool]:
+    text = _flatten_content_blocks(answer_text).strip()
+    if not text:
+        return "", False
+    match = re.search(r"<solution>\s*([\s\S]*?)\s*</solution>", text, re.IGNORECASE)
+    if not match:
+        return text, False
+    return str(match.group(1) or "").strip(), True
+
+
+def _uses_eval1_solution_contract(task_name: str) -> bool:
+    return (
+        task_name in {
+            "crispr_delivery",
+            "gwas_variant_prioritization",
+            "rare_disease_diagnosis",
+            "screen_gene_retrieval",
+            "patient_gene_detection",
+            "hle",
+        }
+        or task_name.startswith("gwas_causal_gene")
+        or task_name.startswith("lab_bench")
+    )
+
+
+def _build_eval1_solution_contract_query(query: str) -> str:
+    base_query = str(query or "").strip()
+    contract = (
+        "\n\n[Eval1 Answer Contract]\n"
+        "- You may include brief notes outside tags.\n"
+        "- Put the final answer in exactly one <solution>...</solution> block.\n"
+        "- Inside <solution>, include only the final answer string.\n"
+        "- Do not include extra tags inside <solution>.\n"
+    )
+    return base_query + contract
+
+
 def _extract_answer_tags(text: str) -> list[str]:
     return [match.group(1).upper() for match in re.finditer(r"\[ANSWER\]\s*([A-Za-z])\s*\[/ANSWER\]", text, re.IGNORECASE)]
 
@@ -501,8 +538,8 @@ def _canonicalize_letter_answer(task_name: str, text: str, valid_options: list[s
 
     lines = [line.strip() for line in stripped.splitlines() if line.strip()]
     for line in reversed(lines):
-        if len(line) <= 6:
-            match = re.fullmatch(r"[\[\(\{]?\s*([A-Za-z])\s*[\]\)\}]?", line)
+        if len(line) <= 40:
+            match = re.search(r"([A-Za-z])[\]\)\}]?\s*$", line)
             if match:
                 letter = match.group(1).upper()
                 if not valid_options:
@@ -516,15 +553,17 @@ def _canonicalize_letter_answer(task_name: str, text: str, valid_options: list[s
                 continue
 
     pattern = r"\b([A-Fa-f])\b" if task_name == "crispr_delivery" else r"\b([A-Za-z])\b"
-    match = re.search(pattern, stripped)
-    if match:
-        letter = match.group(1).upper()
-        if not valid_options:
-            return letter
-        if letter in valid_options:
-            return letter
-        print(f"Invalid option '{letter}' extracted, valid range: {valid_options[0]}-{valid_options[-1]}")
-        return ""
+    matches = [match.group(1).upper() for match in re.finditer(pattern, stripped)]
+    if matches:
+        for letter in reversed(matches):
+            if not valid_options:
+                return letter
+            if letter in valid_options:
+                return letter
+        if valid_options:
+            invalid_letter = matches[-1]
+            print(f"Invalid option '{invalid_letter}' extracted, valid range: {valid_options[0]}-{valid_options[-1]}")
+            return ""
 
     if answer_tags:
         for tag in reversed(answer_tags):
@@ -538,15 +577,32 @@ def _canonicalize_variant_answer(text: str, prompt: str) -> str:
     prompt_candidates = _extract_candidate_variants(prompt)
     prompt_map = {item.lower(): item for item in prompt_candidates}
     structured_text = _coerce_structured_text_value(text)
+    exact_text = structured_text.strip()
+    if exact_text.lower() in prompt_map:
+        return prompt_map[exact_text.lower()]
+
     text_candidates = re.findall(r"\brs\d+\b", structured_text, flags=re.IGNORECASE)
 
-    if text_candidates:
+    prompt_hits: list[tuple[int, str]] = []
+    for candidate in prompt_candidates:
+        for match in re.finditer(rf"\b{re.escape(candidate)}\b", structured_text, flags=re.IGNORECASE):
+            prompt_hits.append((match.start(), candidate))
+    prompt_hits.sort(key=lambda item: item[0])
+
+    distinct_prompt_hits = list(dict.fromkeys(candidate for _, candidate in prompt_hits))
+    if len(distinct_prompt_hits) == 1:
+        return distinct_prompt_hits[0]
+
+    distinct_text_candidates = list(dict.fromkeys(text_candidates))
+    if len(distinct_text_candidates) == 1:
         return text_candidates[-1]
 
-    if prompt_candidates:
-        for candidate in prompt_candidates:
-            if re.search(rf"\b{re.escape(candidate)}\b", text, flags=re.IGNORECASE):
-                return candidate
+    if prompt_hits:
+        last_line = next((line.strip() for line in reversed(structured_text.splitlines()) if line.strip()), "")
+        line_candidates = re.findall(r"\brs\d+\b", last_line, flags=re.IGNORECASE)
+        line_prompt_hits = [prompt_map[item.lower()] for item in line_candidates if item.lower() in prompt_map]
+        if len(dict.fromkeys(line_prompt_hits)) == 1:
+            return line_prompt_hits[-1]
 
     return structured_text if structured_text else text.strip()
 
@@ -567,6 +623,7 @@ def _canonicalize_rare_disease_answer(text: str) -> str:
 def _canonicalize_gene_answer(text: str, prompt: str) -> str:
     structured_text = _coerce_structured_text_value(text)
     check_text = structured_text or text
+    exact_text = check_text.strip()
     ensg_candidates = re.findall(r"\bENSG\d{11}\b", check_text)
     if ensg_candidates:
         return ensg_candidates[-1]
@@ -576,18 +633,34 @@ def _canonicalize_gene_answer(text: str, prompt: str) -> str:
         return check_text.strip()
 
     for candidate in candidates:
-        if _contains_token(check_text, candidate):
+        if exact_text.upper() == candidate.upper():
             return candidate
+
+    candidate_hits: list[tuple[int, str]] = []
+    for candidate in candidates:
+        for match in re.finditer(rf"\b{re.escape(candidate)}\b", check_text, flags=re.IGNORECASE):
+            candidate_hits.append((match.start(), candidate))
+    candidate_hits.sort(key=lambda item: item[0])
+
+    distinct_hits = list(dict.fromkeys(candidate for _, candidate in candidate_hits))
+    if len(distinct_hits) == 1:
+        return distinct_hits[0]
+
+    if candidate_hits:
+        last_line = next((line.strip() for line in reversed(check_text.splitlines()) if line.strip()), "")
+        line_hits = [candidate for candidate in candidates if re.search(rf"\b{re.escape(candidate)}\b", last_line, flags=re.IGNORECASE)]
+        if len(line_hits) == 1:
+            return line_hits[0]
 
     return check_text.strip()
 
 
 def normalize_prediction_for_scoring(task_name: str, prompt: str, prediction: Any) -> str:
-    text = _flatten_content_blocks(prediction).strip()
+    text, solution_tag_found = _extract_solution_only(prediction)
     if not text:
         return ""
 
-    if task_name != "gwas_variant_prioritization":
+    if not solution_tag_found and task_name != "gwas_variant_prioritization":
         text = _extract_solution_text(text).strip()
     answer_tag = _extract_answer_tag(text)
     if answer_tag:
@@ -611,46 +684,60 @@ def normalize_prediction_for_scoring(task_name: str, prompt: str, prediction: An
     return text.strip()
 
 
-def _extract_last_tool(trajectory: list[Any], agent: Any) -> str:
-    known_tools = {
-        "query_monarch",
-        "query_gwas_catalog",
-        "query_ensembl",
-        "query_info",
-        "query_uniprot",
-        "query_pubmed",
-        "query_scholar",
-        "blast_sequence",
-        "get_rna_seq_archs4",
-        "query_hpo",
-    }
+_KNOWN_TOOL_NAMES: tuple[str, ...] = (
+    "query_monarch",
+    "query_gwas_catalog",
+    "query_ensembl",
+    "query_info",
+    "query_uniprot",
+    "query_pubmed",
+    "query_scholar",
+    "blast_sequence",
+    "get_rna_seq_archs4",
+    "query_hpo",
+)
 
-    def _scan_text(value: str) -> str:
-        for tool_name in known_tools:
-            if re.search(rf"\b{re.escape(tool_name)}\b", value):
-                return tool_name
-        return ""
 
-    for step in reversed(trajectory or []):
+def _scan_known_tools(value: str) -> list[str]:
+    positions: list[tuple[int, str]] = []
+    for tool_name in _KNOWN_TOOL_NAMES:
+        for match in re.finditer(rf"\b{re.escape(tool_name)}\b", value):
+            positions.append((match.start(), tool_name))
+    positions.sort(key=lambda item: item[0])
+    return [tool_name for _, tool_name in positions]
+
+
+def _extract_tool_trace(trajectory: list[Any], agent: Any) -> list[str]:
+    trace: list[str] = []
+
+    def _extend_trace(text: str) -> None:
+        trace.extend(_scan_known_tools(text))
+
+    for step in trajectory or []:
         step_text = str(step.get("content", step) if isinstance(step, dict) else step)
-        for execute_block in re.findall(r"<execute>(.*?)</execute>", step_text, re.IGNORECASE | re.DOTALL):
-            last_seen = _scan_text(execute_block)
-            if last_seen:
-                return last_seen
-        match = _scan_text(step_text)
-        if match:
-            return match
+        execute_blocks = re.findall(r"<execute>(.*?)</execute>", step_text, re.IGNORECASE | re.DOTALL)
+        if execute_blocks:
+            for execute_block in execute_blocks:
+                _extend_trace(execute_block)
+            continue
+        _extend_trace(step_text)
+
+    if trace:
+        return trace
 
     state = getattr(agent, "_conversation_state", None)
     messages = getattr(state, "get", lambda key, default=None: None)("messages", []) if isinstance(state, dict) else []
     if isinstance(messages, list):
-        for message in reversed(messages):
+        for message in messages:
             content = getattr(message, "content", message)
-            last_seen = _scan_text(str(content))
-            if last_seen:
-                return last_seen
+            _extend_trace(str(content))
 
-    return "unknown"
+    return trace
+
+
+def _extract_last_tool(trajectory: list[Any], agent: Any) -> str:
+    tool_trace = _extract_tool_trace(trajectory, agent)
+    return tool_trace[-1] if tool_trace else "unknown"
 
 
 def _count_tool_calls_from_trajectory(trajectory: list[Any]) -> int:
@@ -1233,6 +1320,7 @@ class EvaluationPipeline:
 
     def _process_instance(self, agent: Any, task_name: str, instance: Dict[str, Any]) -> Dict[str, Any]:
         prompt = instance["prompt"]
+        agent_prompt = _build_eval1_solution_contract_query(prompt) if _uses_eval1_solution_contract(task_name) else prompt
         start_time = time.time()
 
         raw_response: Any = None
@@ -1335,9 +1423,9 @@ class EvaluationPipeline:
                         task_timeout = self.instance_hard_timeout_seconds
 
                 if task_timeout is None:
-                    log, raw_response = agent.go(prompt)
+                    log, raw_response = agent.go(agent_prompt)
                 else:
-                    run_result = run_with_timeout(agent.go, args=[prompt], timeout=task_timeout)
+                    run_result = run_with_timeout(agent.go, args=[agent_prompt], timeout=task_timeout)
 
                     if isinstance(run_result, tuple) and len(run_result) == 2:
                         log, raw_response = run_result
@@ -1442,7 +1530,10 @@ class EvaluationPipeline:
         tool_calls = _count_tool_calls_from_trajectory(trajectory)
         if tool_calls == 0:
             tool_calls = _count_tool_calls_from_agent_state(agent)
-        last_tool = _extract_last_tool(trajectory, agent)
+        tool_trace = _extract_tool_trace(trajectory, agent)
+        if tool_calls == 0 and tool_trace:
+            tool_calls = len(tool_trace)
+        last_tool = tool_trace[-1] if tool_trace else _extract_last_tool(trajectory, agent)
         if instance_timed_out:
             timeout_meta = timeout_meta or {}
             timeout_meta = dict(timeout_meta)
@@ -1460,12 +1551,15 @@ class EvaluationPipeline:
             "task_name": task_name,
             "instance_id": instance["instance_id"],
             "prompt": prompt,
+            "agent_prompt": agent_prompt,
+            "raw_response": raw_response,
             "prediction": prediction,
             "ground_truth": instance["ground_truth"],
             "score": score,
             "success": success,
             "error": error,
             "trajectory": trajectory,
+            "tool_trace": tool_trace,
             "metrics": {
                 "latency": end_time - start_time,
                 "tool_calls": tool_calls,

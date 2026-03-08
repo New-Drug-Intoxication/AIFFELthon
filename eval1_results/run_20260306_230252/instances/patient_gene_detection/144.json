@@ -1,0 +1,55 @@
+{
+  "task_name": "patient_gene_detection",
+  "instance_id": "144",
+  "prompt": "\nTask: Given a patient's phenotypes and a list of candidate genes, identify the causal gene.\nPhenotypes: HP:0000343, HP:0000582, HP:0001251, HP:0001254, HP:0001510, HP:0001999, HP:0002094, HP:0008872, HP:0002007, HP:0000767, HP:0000316, HP:0000286, HP:0002119, HP:0007642, HP:0012426\nCandidate genes: ENSG00000070367, ENSG00000197535, ENSG00000284770, ENSG00000183072, ENSG00000168291, ENSG00000100519, ENSG00000010704, ENSG00000107882, ENSG00000092054, ENSG00000177189\n\nOutput format: {'causal_gene': [gene1]}\n        ",
+  "raw_response": {
+    "causal_gene": [
+      "ENSG00000177189"
+    ]
+  },
+  "prediction": {
+    "causal_gene": [
+      "ENSG00000177189"
+    ]
+  },
+  "ground_truth": "ENSG00000168291",
+  "score": 0.0,
+  "success": false,
+  "error": null,
+  "trajectory": [
+    "<solution>local_patient_gene_kg</solution>"
+  ],
+  "tool_trace": [],
+  "metrics": {
+    "latency": 0.00041413307189941406,
+    "tool_calls": 0,
+    "timeout_source": null,
+    "elapsed_seconds": null,
+    "tool_calls_before_timeout": null,
+    "last_tool_used": null,
+    "patient_gene_local_kg_used": true,
+    "patient_gene_local_kg_confidence": 1.0,
+    "patient_gene_local_kg_method": "local_p2g",
+    "patient_gene_local_kg_top2_scores": [
+      [
+        "ENSG00000177189",
+        8
+      ],
+      [
+        "ENSG00000107882",
+        7
+      ]
+    ],
+    "patient_gene_local_kg_prediction_score": null,
+    "raw_response_type": "dict",
+    "normalized_prediction_len": 1,
+    "token_steps": [],
+    "token_prompt_total": 0,
+    "token_completion_total": 0,
+    "token_total": 0,
+    "token_usage_source": "runtime_tracker",
+    "token_usage_by_component": {}
+  },
+  "worker_slot": 8,
+  "logged_at": "2026-03-06T23:03:33"
+}

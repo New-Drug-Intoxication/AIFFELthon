@@ -1,0 +1,55 @@
+{
+  "task_name": "patient_gene_detection",
+  "instance_id": "152",
+  "prompt": "\nTask: Given a patient's phenotypes and a list of candidate genes, identify the causal gene.\nPhenotypes: HP:0000262, HP:0000494, HP:0000520, HP:0000592, HP:0000684, HP:0000944, HP:0001334, HP:0001511, HP:0002650, HP:0002652, HP:0002757, HP:0003312, HP:0004322, HP:0006367, HP:0011800, HP:0009118, HP:0005692, HP:0001263, HP:0000742, HP:0031005, HP:0030828, HP:0012653, HP:0100526, HP:0410005, HP:0011967, HP:0000966, HP:0001083, HP:0012514, HP:0001395\nCandidate genes: ENSG00000185379, ENSG00000101200, ENSG00000169397, ENSG00000198799, ENSG00000153956, ENSG00000128567, ENSG00000185624, ENSG00000075891, ENSG00000157764, ENSG00000169862, ENSG00000165704, ENSG00000106799\n\nOutput format: {'causal_gene': [gene1]}\n        ",
+  "raw_response": {
+    "causal_gene": [
+      "ENSG00000185624"
+    ]
+  },
+  "prediction": {
+    "causal_gene": [
+      "ENSG00000185624"
+    ]
+  },
+  "ground_truth": "ENSG00000185624",
+  "score": 1.0,
+  "success": true,
+  "error": null,
+  "trajectory": [
+    "<solution>local_patient_gene_kg</solution>"
+  ],
+  "tool_trace": [],
+  "metrics": {
+    "latency": 0.0002799034118652344,
+    "tool_calls": 0,
+    "timeout_source": null,
+    "elapsed_seconds": null,
+    "tool_calls_before_timeout": null,
+    "last_tool_used": null,
+    "patient_gene_local_kg_used": true,
+    "patient_gene_local_kg_confidence": 1.5454545454545454,
+    "patient_gene_local_kg_method": "local_p2g",
+    "patient_gene_local_kg_top2_scores": [
+      [
+        "ENSG00000185624",
+        17
+      ],
+      [
+        "ENSG00000157764",
+        10
+      ]
+    ],
+    "patient_gene_local_kg_prediction_score": null,
+    "raw_response_type": "dict",
+    "normalized_prediction_len": 1,
+    "token_steps": [],
+    "token_prompt_total": 0,
+    "token_completion_total": 0,
+    "token_total": 0,
+    "token_usage_source": "runtime_tracker",
+    "token_usage_by_component": {}
+  },
+  "worker_slot": 8,
+  "logged_at": "2026-03-06T21:39:48"
+}

@@ -76,6 +76,31 @@ def load_env() -> None:
             return
 
 
+def _json_default(value: Any) -> str:
+    return str(value)
+
+
+def _append_jsonl(path: Path, payload: Any) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False, default=_json_default) + "\n")
+
+
+def _write_json_artifact(path: Path, payload: Any) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+
+
+def _safe_log_name(value: Any) -> str:
+    text = str(value or "unknown").strip() or "unknown"
+    for sep in (os.sep, os.altsep):
+        if sep:
+            text = text.replace(sep, "_")
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+    return (safe[:200] or "unknown")
+
+
 # ---------------------------------------------------------------------------
 # SSE logger — replaces SQLiteLogger for the web session
 # ---------------------------------------------------------------------------
@@ -92,6 +117,7 @@ class _WebSSELogger(BaseLogger):
         enqueue: Callable[[Dict[str, Any]], None],
         total_cases: int,
         task_available: Dict[str, int],
+        run_dir: Optional[Path] = None,
     ) -> None:
         self._enqueue = enqueue
         self._total = total_cases
@@ -99,6 +125,12 @@ class _WebSSELogger(BaseLogger):
         self._completed = 0
         self._summary: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._run_dir = run_dir
+        self._instance_results_path = run_dir / "instance_results.jsonl" if run_dir else None
+        self._task_metrics_path = run_dir / "task_metrics.jsonl" if run_dir else None
+        self._instances_dir = run_dir / "instances" if run_dir else None
+        if self._instances_dir is not None:
+            self._instances_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # BaseLogger interface
@@ -135,6 +167,7 @@ class _WebSSELogger(BaseLogger):
                 s["tokens"].append(token_total)
             completed  = self._completed
             tasks_snap = self._build_snapshot()
+            self._persist_result_locked(result, worker_slot)
 
         self._enqueue({
             "type": "case_done",
@@ -157,7 +190,8 @@ class _WebSSELogger(BaseLogger):
         })
 
     def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None) -> None:
-        pass
+        with self._lock:
+            self._persist_metrics_locked(metrics, step=step)
 
     def finish(self) -> None:
         pass
@@ -179,12 +213,43 @@ class _WebSSELogger(BaseLogger):
                 "correct":     s["correct"],
                 "partial":     s["partial"],
                 "incorrect":   s["incorrect"],
+                "accuracy":    round(s["correct"] / s["done"], 4) if s["done"] else 0.0,
                 "avg_latency": round(sum(lat) / len(lat), 1) if lat else 0.0,
                 "std_latency": round(statistics.pstdev(lat), 1) if len(lat) > 1 else 0.0,
                 "avg_tokens":  round(sum(tok) / len(tok)) if tok else 0,
                 "std_tokens":  round(statistics.pstdev(tok)) if len(tok) > 1 else 0,
             })
         return rows
+
+    def _persist_result_locked(self, result: Dict[str, Any], worker_slot: int) -> None:
+        if self._instance_results_path is None or self._instances_dir is None:
+            return
+
+        task_name = str(result.get("task_name", "unknown")) or "unknown"
+        instance_id = str(result.get("instance_id", "unknown")) or "unknown"
+        record = dict(result)
+        record["task_name"] = task_name
+        record["instance_id"] = instance_id
+        record["worker_slot"] = worker_slot
+        record["logged_at"] = dt.datetime.now().isoformat(timespec="seconds")
+        record.pop("_worker_slot", None)
+
+        _append_jsonl(self._instance_results_path, record)
+
+        task_dir = self._instances_dir / _safe_log_name(task_name)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        _write_json_artifact(task_dir / f"{_safe_log_name(instance_id)}.json", record)
+
+    def _persist_metrics_locked(self, metrics: Dict[str, float], step: Optional[int] = None) -> None:
+        if self._task_metrics_path is None:
+            return
+
+        record = {
+            "logged_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "step": step,
+            "metrics": metrics,
+        }
+        _append_jsonl(self._task_metrics_path, record)
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -343,8 +408,8 @@ HTML_PAGE = f"""<!doctype html>
 
         <div class="ctrl-row">
           <div class="ctrl">
-            <label>Per-task limit</label>
-            <input type="number" id="taskLimit" value="3" min="1" max="999">
+            <label>Per-task limit (blank = all)</label>
+            <input type="number" id="taskLimit" value="" min="1" max="999" placeholder="all">
           </div>
           <div class="ctrl">
             <label>Split</label>
@@ -399,7 +464,7 @@ HTML_PAGE = f"""<!doctype html>
         </div>
         <div class="progress-bar-wrap"><div class="progress-bar-fill" id="progressFill" style="width:0%"></div></div>
         <table id="taskTable">
-          <thead><tr><th>Task</th><th>Done</th><th>OK</th><th>Part</th><th>Fail</th><th>Avg(s)</th><th>Avg Tok</th></tr></thead>
+          <thead><tr><th>Task</th><th>Done</th><th>OK</th><th>Part</th><th>Fail</th><th>Acc</th><th>Avg(s)</th><th>Avg Tok</th></tr></thead>
           <tbody id="taskTableBody"></tbody>
         </table>
       </div>
@@ -532,6 +597,7 @@ HTML_PAGE = f"""<!doctype html>
         <td class="grade-correct">${{t.correct}}</td>
         <td class="grade-partial">${{t.partial}}</td>
         <td class="grade-incorrect">${{t.incorrect}}</td>
+        <td>${{((t.accuracy || 0) * 100).toFixed(1)}}%</td>
         <td>${{t.avg_latency}}s</td>
         <td>${{t.avg_tokens > 0 ? t.avg_tokens.toLocaleString() : "-"}}</td>`;
       taskTableBody.appendChild(tr);
@@ -595,13 +661,19 @@ HTML_PAGE = f"""<!doctype html>
     setStatus("Connecting...");
 
     const params = new URLSearchParams({{
-      eval_task_limit:    String(Math.max(1, parseInt(taskLimitEl.value)||3)),
       eval_split:         (evalSplitEl.value||"val").trim()||"val",
       eval_parallelism:   String(Math.min(32, Math.max(1, parseInt(parallelismEl.value)||1))),
       eval_task_scope:    taskScopeEl.value||"all",
       eval_start_task:    startTaskEl.value||"",
       eval_selected_tasks: selected.join(","),
     }});
+    const rawTaskLimit = String(taskLimitEl.value || "").trim();
+    if (rawTaskLimit !== "") {{
+      const parsedTaskLimit = parseInt(rawTaskLimit, 10);
+      if (Number.isFinite(parsedTaskLimit) && parsedTaskLimit > 0) {{
+        params.set("eval_task_limit", String(parsedTaskLimit));
+      }}
+    }}
 
     es = new EventSource(`/api/stream?${{params}}`);
 
@@ -768,7 +840,13 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
         def _p(key: str, default: str = "") -> str:
             return (params.get(key, [default])[0] or default).strip()
 
-        task_limit  = max(1, int(_p("eval_task_limit", "3") or "3"))
+        raw_task_limit = _p("eval_task_limit")
+        task_limit: Optional[int] = None
+        if raw_task_limit:
+            try:
+                task_limit = max(1, int(raw_task_limit))
+            except ValueError:
+                task_limit = None
         split       = _p("eval_split", "val") or "val"
         parallelism = max(1, min(32, int(_p("eval_parallelism", "1") or "1")))
         scope       = _p("eval_task_scope", "all")
@@ -824,7 +902,16 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
                 enqueue({"type": "_eof", "payload": {}})
 
         try:
-            send_sse("status", {"message": f"Starting eval1 (split={split}, tasks={scope}, parallel={parallelism})"})
+            task_limit_label = "all" if task_limit is None else str(task_limit)
+            send_sse(
+                "status",
+                {
+                    "message": (
+                        f"Starting eval1 (split={split}, tasks={scope}, "
+                        f"parallel={parallelism}, per-task={task_limit_label})"
+                    )
+                },
+            )
             t = threading.Thread(target=bg_worker, daemon=True)
             t.start()
 
@@ -865,7 +952,7 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
     def _run_eval1(
         self, *,
         split: str,
-        task_limit: int,
+        task_limit: Optional[int],
         scope: str,
         start_task: str,
         selected_tasks: List[str],
@@ -905,10 +992,15 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
         # ── Count instances ──────────────────────────────────────────
         task_available: Dict[str, int] = {}
         task_effective: Dict[str, int] = {}
+        task_limit_label = "all" if task_limit is None else str(task_limit)
         for t in scoped:
             all_inst = bm.get_instances(t, split)
             task_available[t] = len(all_inst)
-            task_effective[t] = min(task_limit, len(all_inst))
+            task_effective[t] = (
+                min(task_limit, len(all_inst))
+                if isinstance(task_limit, int)
+                else len(all_inst)
+            )
 
         total_cases = sum(task_effective[t] for t in scoped)
         if total_cases == 0:
@@ -921,6 +1013,7 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
         (run_dir / "run_config.json").write_text(json.dumps({
             "split":        split,
             "task_limit":   task_limit,
+            "task_limit_label": task_limit_label,
             "parallelism":  parallelism,
             "scope":        scope,
             "start_task":   start_task,
@@ -929,16 +1022,32 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
             "total_cases":  total_cases,
             "started_at":   dt.datetime.now().isoformat(timespec="seconds"),
         }, indent=2, ensure_ascii=False), encoding="utf-8")
+        events_path = run_dir / "events.jsonl"
+        event_lock = threading.Lock()
 
-        enqueue({"type": "status", "payload": {
-            "message": f"Tasks: {scoped} | Total: {total_cases} | Parallel: {parallelism}",
+        def emit(item: Dict[str, Any]) -> None:
+            event_record = {
+                "logged_at": dt.datetime.now().isoformat(timespec="seconds"),
+                "type": item.get("type", ""),
+                "payload": item.get("payload", {}),
+            }
+            with event_lock:
+                _append_jsonl(events_path, event_record)
+            enqueue(item)
+
+        emit({"type": "status", "payload": {
+            "message": (
+                f"Tasks: {scoped} | Total: {total_cases} | "
+                f"Parallel: {parallelism} | Per-task: {task_limit_label}"
+            ),
         }})
 
         # ── Shared SSE logger ────────────────────────────────────────
         sse_logger = _WebSSELogger(
-            enqueue=enqueue,
+            enqueue=emit,
             total_cases=total_cases,
             task_available=task_available,
+            run_dir=run_dir,
         )
 
         # ── Agent factory (identical to run_eval.py) ─────────────────
@@ -956,7 +1065,7 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
             if cancel.is_set():
                 return
 
-            enqueue({"type": "task_start", "payload": {
+            emit({"type": "task_start", "payload": {
                 "task_name":   task_name,
                 "worker_slot": slot,
                 "limit":       task_effective[task_name],
@@ -965,7 +1074,8 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
             # Wrap SSE logger to inject worker_slot into results
             class _SlottedLogger(BaseLogger):
                 def log_config(self, c: Any) -> None:       pass
-                def log_metrics(self, m: Any, step=None):   pass
+                def log_metrics(self, m: Any, step=None):
+                    sse_logger.log_metrics(m, step=step)
                 def finish(self) -> None:                   pass
                 def log_result(self, result: Dict[str, Any]) -> None:
                     result["_worker_slot"] = slot
@@ -980,7 +1090,7 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
             )
             pipeline.run(tasks=[task_name], split=split)
 
-            enqueue({"type": "task_done", "payload": {
+            emit({"type": "task_done", "payload": {
                 "task_name":   task_name,
                 "worker_slot": slot,
             }})
@@ -1017,7 +1127,7 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
                     try:
                         f.result()
                     except Exception as exc:
-                        enqueue({"type": "status", "payload": {
+                        emit({"type": "status", "payload": {
                             "message": f"Task {tname} failed: {exc}",
                         }})
                     if not cancel.is_set():
@@ -1038,24 +1148,34 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
         # ── Save summary ─────────────────────────────────────────────
         snap = sse_logger.snapshot()
         summary = {
-            "split": split, "task_limit": task_limit, "parallelism": workers,
+            "split": split, "task_limit": task_limit, "task_limit_label": task_limit_label, "parallelism": workers,
             "scope": scope, "tasks": scoped, "results": snap["tasks"],
         }
         (run_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8",
         )
+        with event_lock:
+            _append_jsonl(
+                events_path,
+                {
+                    "logged_at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "type": "run_summary",
+                    "payload": summary,
+                },
+            )
 
         lines = [
             f"# Eval1 Summary  ({timestamp})",
-            f"split={split}  per_task_limit={task_limit}  parallelism={workers}",
+            f"split={split}  per_task_limit={task_limit_label}  parallelism={workers}",
             f"output_dir: {run_dir}", "",
-            "| Task | Done | Correct | Partial | Incorrect | Avg(s) | Avg Tokens |",
-            "|------|:----:|:-------:|:-------:|:---------:|:------:|:----------:|",
+            "| Task | Done | Correct | Partial | Incorrect | Acc | Avg(s) | Avg Tokens |",
+            "|------|:----:|:-------:|:-------:|:---------:|:---:|:------:|:----------:|",
         ]
         for t in snap["tasks"]:
+            acc = f"{t['accuracy'] * 100:.1f}%"
             avg = f"{t['avg_latency']:.1f}" if t["avg_latency"] else "-"
             avg_tok = f"{t['avg_tokens']:,}" if t.get("avg_tokens") else "-"
-            lines.append(f"| {t['task_name']} | {t['done']} | {t['correct']} | {t['partial']} | {t['incorrect']} | {avg} | {avg_tok} |")
+            lines.append(f"| {t['task_name']} | {t['done']} | {t['correct']} | {t['partial']} | {t['incorrect']} | {acc} | {avg} | {avg_tok} |")
         md = "\n".join(lines) + "\n"
         (run_dir / "summary.md").write_text(md, encoding="utf-8")
 
@@ -1063,6 +1183,10 @@ class BiomniWebHandler(BaseHTTPRequestHandler):
             "output_dir":   str(run_dir),
             "summary_text": md,
             "results":      snap["tasks"],
+            "events_path": str(events_path),
+            "instance_results_path": str(run_dir / "instance_results.jsonl"),
+            "instances_dir": str(run_dir / "instances"),
+            "task_metrics_path": str(run_dir / "task_metrics.jsonl"),
         }
 
 

@@ -1,0 +1,140 @@
+{
+  "split": "val",
+  "task_limit": 3,
+  "parallelism": 10,
+  "scope": "all",
+  "tasks": [
+    "crispr_delivery",
+    "gwas_causal_gene_gwas_catalog",
+    "gwas_causal_gene_opentargets",
+    "gwas_causal_gene_pharmaprojects",
+    "gwas_variant_prioritization",
+    "lab_bench_dbqa",
+    "lab_bench_seqqa",
+    "patient_gene_detection",
+    "rare_disease_diagnosis",
+    "screen_gene_retrieval"
+  ],
+  "results": [
+    {
+      "task_name": "crispr_delivery",
+      "done": 3,
+      "available": 10,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 2,
+      "avg_latency": 7.2,
+      "std_latency": 1.1,
+      "avg_tokens": 21019,
+      "std_tokens": 233
+    },
+    {
+      "task_name": "gwas_causal_gene_gwas_catalog",
+      "done": 3,
+      "available": 50,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 2,
+      "avg_latency": 4.5,
+      "std_latency": 1.0,
+      "avg_tokens": 16815,
+      "std_tokens": 476
+    },
+    {
+      "task_name": "gwas_causal_gene_opentargets",
+      "done": 3,
+      "available": 50,
+      "correct": 3,
+      "partial": 0,
+      "incorrect": 0,
+      "avg_latency": 10.9,
+      "std_latency": 5.3,
+      "avg_tokens": 15778,
+      "std_tokens": 467
+    },
+    {
+      "task_name": "gwas_causal_gene_pharmaprojects",
+      "done": 3,
+      "available": 50,
+      "correct": 2,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 14.9,
+      "std_latency": 8.3,
+      "avg_tokens": 17445,
+      "std_tokens": 470
+    },
+    {
+      "task_name": "gwas_variant_prioritization",
+      "done": 3,
+      "available": 43,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 2,
+      "avg_latency": 45.0,
+      "std_latency": 24.3,
+      "avg_tokens": 37548,
+      "std_tokens": 22092
+    },
+    {
+      "task_name": "lab_bench_dbqa",
+      "done": 3,
+      "available": 50,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 2,
+      "avg_latency": 75.5,
+      "std_latency": 60.9,
+      "avg_tokens": 30654,
+      "std_tokens": 9359
+    },
+    {
+      "task_name": "lab_bench_seqqa",
+      "done": 3,
+      "available": 50,
+      "correct": 2,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 11.7,
+      "std_latency": 4.2,
+      "avg_tokens": 23066,
+      "std_tokens": 1841
+    },
+    {
+      "task_name": "patient_gene_detection",
+      "done": 3,
+      "available": 50,
+      "correct": 2,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 15.4,
+      "std_latency": 21.7,
+      "avg_tokens": 0,
+      "std_tokens": 0
+    },
+    {
+      "task_name": "rare_disease_diagnosis",
+      "done": 3,
+      "available": 30,
+      "correct": 2,
+      "partial": 0,
+      "incorrect": 1,
+      "avg_latency": 93.2,
+      "std_latency": 4.4,
+      "avg_tokens": 42709,
+      "std_tokens": 8361
+    },
+    {
+      "task_name": "screen_gene_retrieval",
+      "done": 3,
+      "available": 50,
+      "correct": 1,
+      "partial": 0,
+      "incorrect": 2,
+      "avg_latency": 6.6,
+      "std_latency": 1.1,
+      "avg_tokens": 22179,
+      "std_tokens": 534
+    }
+  ]
+}

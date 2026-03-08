@@ -1,0 +1,56 @@
+{
+  "task_name": "patient_gene_detection",
+  "instance_id": "143",
+  "prompt": "\nTask: Given a patient's phenotypes and a list of candidate genes, identify the causal gene.\nPhenotypes: HP:0000474, HP:0000733, HP:0002354, HP:0002442, HP:0002446, HP:0006892, HP:0010522, HP:0011204, HP:0001250, HP:0002300, HP:0012735, HP:0001347, HP:0000741, HP:0008572, HP:0000554, HP:0012653, HP:0011736, HP:0001025\nCandidate genes: ENSG00000092330, ENSG00000131174, ENSG00000113318, ENSG00000197563, ENSG00000130638, ENSG00000118965, ENSG00000131446, ENSG00000051180, ENSG00000075673, ENSG00000161011\n\nOutput format: {'causal_gene': [gene1]}\n        ",
+  "agent_prompt": "Task: Given a patient's phenotypes and a list of candidate genes, identify the causal gene.\nPhenotypes: HP:0000474, HP:0000733, HP:0002354, HP:0002442, HP:0002446, HP:0006892, HP:0010522, HP:0011204, HP:0001250, HP:0002300, HP:0012735, HP:0001347, HP:0000741, HP:0008572, HP:0000554, HP:0012653, HP:0011736, HP:0001025\nCandidate genes: ENSG00000092330, ENSG00000131174, ENSG00000113318, ENSG00000197563, ENSG00000130638, ENSG00000118965, ENSG00000131446, ENSG00000051180, ENSG00000075673, ENSG00000161011\n\nOutput format: {'causal_gene': [gene1]}\n\n[Eval1 Answer Contract]\n- You may include brief notes outside tags.\n- Put the final answer in exactly one <solution>...</solution> block.\n- Inside <solution>, include only the final answer string.\n- Do not include extra tags inside <solution>.\n",
+  "raw_response": {
+    "causal_gene": [
+      "ENSG00000161011"
+    ]
+  },
+  "prediction": {
+    "causal_gene": [
+      "ENSG00000161011"
+    ]
+  },
+  "ground_truth": "ENSG00000161011",
+  "score": 1.0,
+  "success": true,
+  "error": null,
+  "trajectory": [
+    "<solution>local_patient_gene_kg</solution>"
+  ],
+  "tool_trace": [],
+  "metrics": {
+    "latency": 40.388208627700806,
+    "tool_calls": 0,
+    "timeout_source": null,
+    "elapsed_seconds": null,
+    "tool_calls_before_timeout": null,
+    "last_tool_used": null,
+    "patient_gene_local_kg_used": true,
+    "patient_gene_local_kg_confidence": 3.0,
+    "patient_gene_local_kg_method": "local_p2g",
+    "patient_gene_local_kg_top2_scores": [
+      [
+        "ENSG00000161011",
+        12
+      ],
+      [
+        "ENSG00000197563",
+        3
+      ]
+    ],
+    "patient_gene_local_kg_prediction_score": null,
+    "raw_response_type": "dict",
+    "normalized_prediction_len": 1,
+    "token_steps": [],
+    "token_prompt_total": 0,
+    "token_completion_total": 0,
+    "token_total": 0,
+    "token_usage_source": "runtime_tracker",
+    "token_usage_by_component": {}
+  },
+  "worker_slot": 8,
+  "logged_at": "2026-03-08T12:28:08"
+}
